@@ -58,6 +58,14 @@
             <div id="terminal"></div>
         </div>
 
+        <!-- Local input is rendered outside xterm so edits never mutate TUI output. -->
+        <div class="local-input-composer" id="local-input-composer">
+            <span class="local-input-label">LOCAL</span>
+            <span class="local-input-prompt">›</span>
+            <span class="local-input-text" id="local-input-before"></span><span class="local-input-cursor" aria-hidden="true"></span><span class="local-input-text" id="local-input-after"></span>
+            <span class="local-input-hint">Enter envía · Ctrl+B Live</span>
+        </div>
+
         <!-- Status Bar -->
         <div class="status-bar">
             <span class="status-item" id="status-connection">
@@ -185,6 +193,10 @@
         let localBuffer = '';
         let localCursor = 0;
 
+        const localComposer = document.getElementById('local-input-composer');
+        const localInputBefore = document.getElementById('local-input-before');
+        const localInputAfter = document.getElementById('local-input-after');
+
         function sendInput(data) {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 try {
@@ -200,46 +212,41 @@
             return data && !/[\x00-\x1f\x7f\x1b]/.test(data);
         }
 
-        function csiCount(n) {
-            return n > 1 ? String(n) : '';
+        function renderLocalInput() {
+            // Root cause of the OpenCode UI corruption: local echo used xterm CSI
+            // edits (DCH/EL/ICH) on the real terminal buffer. Full-screen TUIs own
+            // that buffer, so deleting local text could shift/redraw their UI.
+            // Keep every local edit in DOM only; xterm receives nothing until Enter.
+            localInputBefore.textContent = localBuffer.slice(0, localCursor);
+            localInputAfter.textContent = localBuffer.slice(localCursor);
         }
 
         function insertLocalVisual(text) {
-            // Never repaint the whole command line for normal typing.
-            // Full redraws move the visible xterm cursor back to column 0 and are
-            // noticeable on mobile/slow renderers. Instead mutate only the local
-            // edit span at the current cursor: append fast, or ICH + write for
-            // mid-line inserts.
             if (!text) return;
-            const oldLength = localBuffer.length;
-            const oldCursor = localCursor;
             localBuffer = localBuffer.slice(0, localCursor) + text + localBuffer.slice(localCursor);
             localCursor += text.length;
-            if (oldCursor === oldLength) {
-                terminal.write(text);
-            } else {
-                terminal.write(`\x1b[${csiCount(text.length)}@${text}`); // ICH n, then fill inserted cells
-            }
+            renderLocalInput();
         }
 
         function deleteLocalVisual(count) {
-            // Delete count cells immediately before the local cursor using DCH.
-            // Cursor moves only by the deleted width; no jump-to-start repaint.
             if (count <= 0 || localCursor <= 0) return;
             count = Math.min(count, localCursor);
             localBuffer = localBuffer.slice(0, localCursor - count) + localBuffer.slice(localCursor);
             localCursor -= count;
-            terminal.write(`\x1b[${csiCount(count)}D\x1b[${csiCount(count)}P`);
+            renderLocalInput();
+        }
+
+        function deleteLocalForward(count) {
+            if (count <= 0 || localCursor >= localBuffer.length) return;
+            count = Math.min(count, localBuffer.length - localCursor);
+            localBuffer = localBuffer.slice(0, localCursor) + localBuffer.slice(localCursor + count);
+            renderLocalInput();
         }
 
         function clearLocalBufferVisual() {
-            // Same rule: one xterm write, no intermediate cursor frame.
-            let seq = '';
-            const right = localBuffer.length - localCursor;
-            if (right > 0) seq += `\x1b[${right}C`;
-            if (localBuffer.length > 0) seq += `\x1b[${localBuffer.length}D`;
-            seq += '\x1b[K';
-            terminal.write(seq);
+            localBuffer = '';
+            localCursor = 0;
+            renderLocalInput();
         }
 
         function handleLocalInput(data) {
@@ -249,8 +256,6 @@
             if (data === '\r' || data === '\n' || data === '\r\n') {
                 const line = localBuffer;
                 clearLocalBufferVisual();
-                localBuffer = '';
-                localCursor = 0;
                 sendInput(line + '\r');
                 return true;
             }
@@ -274,28 +279,31 @@
                 return true;
             }
             if (data === '\x01') { // Ctrl+A
-                if (localCursor > 0) terminal.write(`\x1b[${localCursor}D`);
                 localCursor = 0;
+                renderLocalInput();
                 return true;
             }
             if (data === '\x05') { // Ctrl+E
-                const move = localBuffer.length - localCursor;
-                if (move > 0) terminal.write(`\x1b[${move}C`);
                 localCursor = localBuffer.length;
+                renderLocalInput();
                 return true;
             }
             if (data === '\x1b[D') { // Left
                 if (localCursor > 0) {
-                    terminal.write('\x1b[D');
                     localCursor--;
+                    renderLocalInput();
                 }
                 return true;
             }
             if (data === '\x1b[C') { // Right
                 if (localCursor < localBuffer.length) {
-                    terminal.write('\x1b[C');
                     localCursor++;
+                    renderLocalInput();
                 }
+                return true;
+            }
+            if (data === '\x1b[3~') { // Delete
+                deleteLocalForward(1);
                 return true;
             }
 
@@ -312,13 +320,14 @@
         function updateLocalInputUI() {
             document.getElementById('status-input-mode').textContent = localInputMode ? 'Local' : 'Live';
             document.getElementById('local-input-btn').classList.toggle('active', localInputMode);
+            localComposer.classList.toggle('hidden', !localInputMode);
+            renderLocalInput();
+            setTimeout(scheduleResize, 0);
         }
 
         function toggleLocalInput() {
             if (localBuffer) {
                 clearLocalBufferVisual();
-                localBuffer = '';
-                localCursor = 0;
             }
             localInputMode = !localInputMode;
             localStorage.setItem('webconsole.localInputMode', localInputMode ? 'on' : 'off');

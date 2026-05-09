@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.env.*
+!.env.example
+sessions/
+app/sessions/
+*.log
+.DS_Store
+node_modules/
+*.tgz

@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terminal - WebConsole</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/js/lib/xterm.css">
+    <link rel="stylesheet" href="/static/css/console.css">
+</head>
+<body class="terminal-mode">
+    <div class="terminal-app">
+        <!-- Top Bar -->
+        <header class="terminal-header">
+            <div class="header-left">
+                <a href="/" class="back-btn" title="Dashboard">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M19 12H5M12 19l-7-7 7-7"/>
+                    </svg>
+                </a>
+                <span class="session-id">session-{{ session_id }}</span>
+                <span class="connection-badge" id="connection-badge">
+                    <span class="dot"></span>
+                    Connecting
+                </span>
+            </div>
+            <div class="header-actions">
+                <button class="action-btn active" id="local-input-btn" onclick="toggleLocalInput()" title="Local input buffering: type locally, send on Enter (Ctrl+B)">
+                    <span class="kbd-icon">LI</span>
+                </button>
+                <button class="action-btn" onclick="copyLink()" title="Copy Link">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                    </svg>
+                </button>
+                <button class="action-btn" onclick="toggleFullscreen()" title="Fullscreen">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+                    </svg>
+                </button>
+                <button class="action-btn" onclick="clearTerminal()" title="Clear">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                    </svg>
+                </button>
+                <button class="action-btn danger" onclick="killSession()" title="Kill Session">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Terminal Container -->
+        <div class="terminal-wrapper" id="terminal-wrapper">
+            <div id="terminal"></div>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <span class="status-item" id="status-connection">
+                <span class="indicator"></span>
+                <span class="label">Connection</span>
+            </span>
+            <span class="status-item">
+                <span class="label">Cols</span>
+                <span class="value" id="status-cols">--</span>
+            </span>
+            <span class="status-item">
+                <span class="label">Rows</span>
+                <span class="value" id="status-rows">--</span>
+            </span>
+            <span class="status-item">
+                <span class="label">Encoding</span>
+                <span class="value">UTF-8</span>
+            </span>
+            <span class="status-item">
+                <span class="label">Latency</span>
+                <span class="value" id="status-latency">--ms</span>
+            </span>
+            <span class="status-item">
+                <span class="label">Input</span>
+                <span class="value" id="status-input-mode">Local</span>
+            </span>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/js/lib/xterm-531.js"></script>
+    <script src="/static/js/lib/xterm-addon-fit-081.js"></script>
+    <script src="/static/js/lib/xterm-addon-web-links-090.js"></script>
+    <script src="/static/js/lib/pako-210.min.js"></script>
+    <script>
+        const sessionId = '{{ session_id }}';
+        const token = '{{ token }}';
+
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        let lastPingTime = 0;
+
+        // Initialize xterm
+        const terminal = new Terminal({
+            cursorBlink: true,
+            cursorStyle: 'block',
+            fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
+            fontSize: 14,
+            lineHeight: 1.2,
+            letterSpacing: 0,
+            scrollback: 3000,
+            smoothScrollDuration: 0,
+            fastScrollModifier: 'alt',
+            theme: {
+                background: '#1a1a2e',
+                foreground: '#eee',
+                cursor: '#fff',
+                cursorAccent: '#1a1a2e',
+                selection: 'rgba(255, 255, 255, 0.3)',
+                black: '#1a1a2e',
+                red: '#ff5370',
+                green: '#c3e88d',
+                yellow: '#ffcb6b',
+                blue: '#82aaff',
+                magenta: '#c792ea',
+                cyan: '#89ddff',
+                white: '#eeffff',
+                brightBlack: '#545580',
+                brightRed: '#ff5370',
+                brightGreen: '#c3e88d',
+                brightYellow: '#ffcb6b',
+                brightBlue: '#82aaff',
+                brightMagenta: '#c792ea',
+                brightCyan: '#89ddff',
+                brightWhite: '#ffffff'
+            },
+            allowProposedApi: true
+        });
+
+        // Fit addon
+        const fitAddon = new FitAddon.FitAddon();
+        terminal.loadAddon(fitAddon);
+
+        // Web links addon
+        terminal.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+        // Open terminal
+        terminal.open(document.getElementById('terminal'));
+        fitAddon.fit();
+
+        // Handle resize (debounced; avoids flooding slow links)
+        let resizeTimer = null;
+        function sendResize() {
+            const dims = fitAddon.proposeDimensions();
+            if (!dims) return;
+            document.getElementById('status-cols').textContent = dims.cols;
+            document.getElementById('status-rows').textContent = dims.rows;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+            }
+        }
+        function scheduleResize() {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => {
+                fitAddon.fit();
+                sendResize();
+            }, 80);
+        }
+
+        // Initial fit
+        setTimeout(scheduleResize, 100);
+
+        // Resize on window change
+        window.addEventListener('resize', scheduleResize);
+
+        // Send user keystrokes as compact binary frames where possible.
+        // Local input mode keeps normal text editing 100% local and only sends
+        // the completed line on Enter. This removes keystroke-by-keystroke lag
+        // on bad links while still allowing raw control keys to pass through.
+        const encoder = new TextEncoder();
+        let localInputMode = localStorage.getItem('webconsole.localInputMode') !== 'off';
+        let localBuffer = '';
+        let localCursor = 0;
+
+        function sendInput(data) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                try {
+                    ws.send(encoder.encode(data));
+                } catch (_) {
+                    ws.send(JSON.stringify({ type: 'input', data: data }));
+                }
+            }
+        }
+
+        function isPrintableText(data) {
+            // Accept pasted/multichar Unicode text, but not C0 controls or ESC sequences.
+            return data && !/[\x00-\x1f\x7f\x1b]/.test(data);
+        }
+
+        function csiCount(n) {
+            return n > 1 ? String(n) : '';
+        }
+
+        function insertLocalVisual(text) {
+            // Never repaint the whole command line for normal typing.
+            // Full redraws move the visible xterm cursor back to column 0 and are
+            // noticeable on mobile/slow renderers. Instead mutate only the local
+            // edit span at the current cursor: append fast, or ICH + write for
+            // mid-line inserts.
+            if (!text) return;
+            const oldLength = localBuffer.length;
+            const oldCursor = localCursor;
+            localBuffer = localBuffer.slice(0, localCursor) + text + localBuffer.slice(localCursor);
+            localCursor += text.length;
+            if (oldCursor === oldLength) {
+                terminal.write(text);
+            } else {
+                terminal.write(`\x1b[${csiCount(text.length)}@${text}`); // ICH n, then fill inserted cells
+            }
+        }
+
+        function deleteLocalVisual(count) {
+            // Delete count cells immediately before the local cursor using DCH.
+            // Cursor moves only by the deleted width; no jump-to-start repaint.
+            if (count <= 0 || localCursor <= 0) return;
+            count = Math.min(count, localCursor);
+            localBuffer = localBuffer.slice(0, localCursor - count) + localBuffer.slice(localCursor);
+            localCursor -= count;
+            terminal.write(`\x1b[${csiCount(count)}D\x1b[${csiCount(count)}P`);
+        }
+
+        function clearLocalBufferVisual() {
+            // Same rule: one xterm write, no intermediate cursor frame.
+            let seq = '';
+            const right = localBuffer.length - localCursor;
+            if (right > 0) seq += `\x1b[${right}C`;
+            if (localBuffer.length > 0) seq += `\x1b[${localBuffer.length}D`;
+            seq += '\x1b[K';
+            terminal.write(seq);
+        }
+
+        function handleLocalInput(data) {
+            if (!localInputMode) return false;
+
+            // Enter: remove local echo, then send exactly one completed line.
+            if (data === '\r' || data === '\n' || data === '\r\n') {
+                const line = localBuffer;
+                clearLocalBufferVisual();
+                localBuffer = '';
+                localCursor = 0;
+                sendInput(line + '\r');
+                return true;
+            }
+
+            // Backspace / DEL: edit locally only.
+            if (data === '\x7f' || data === '\b') {
+                deleteLocalVisual(1);
+                return true;
+            }
+
+            // Ctrl+U / Ctrl+W / Ctrl+A / Ctrl+E / arrows: useful local line editing.
+            if (data === '\x15') { // Ctrl+U
+                deleteLocalVisual(localCursor);
+                return true;
+            }
+            if (data === '\x17') { // Ctrl+W
+                if (localCursor > 0) {
+                    const left = localBuffer.slice(0, localCursor).replace(/\s*\S+\s*$/, '');
+                    deleteLocalVisual(localCursor - left.length);
+                }
+                return true;
+            }
+            if (data === '\x01') { // Ctrl+A
+                if (localCursor > 0) terminal.write(`\x1b[${localCursor}D`);
+                localCursor = 0;
+                return true;
+            }
+            if (data === '\x05') { // Ctrl+E
+                const move = localBuffer.length - localCursor;
+                if (move > 0) terminal.write(`\x1b[${move}C`);
+                localCursor = localBuffer.length;
+                return true;
+            }
+            if (data === '\x1b[D') { // Left
+                if (localCursor > 0) {
+                    terminal.write('\x1b[D');
+                    localCursor--;
+                }
+                return true;
+            }
+            if (data === '\x1b[C') { // Right
+                if (localCursor < localBuffer.length) {
+                    terminal.write('\x1b[C');
+                    localCursor++;
+                }
+                return true;
+            }
+
+            // Printable text and paste: insert locally and render instantly.
+            if (isPrintableText(data)) {
+                insertLocalVisual(data);
+                return true;
+            }
+
+            // Other controls (Ctrl+C, Ctrl+D, ESC, Up/Down history, Tab) pass through.
+            return false;
+        }
+
+        function updateLocalInputUI() {
+            document.getElementById('status-input-mode').textContent = localInputMode ? 'Local' : 'Live';
+            document.getElementById('local-input-btn').classList.toggle('active', localInputMode);
+        }
+
+        function toggleLocalInput() {
+            if (localBuffer) {
+                clearLocalBufferVisual();
+                localBuffer = '';
+                localCursor = 0;
+            }
+            localInputMode = !localInputMode;
+            localStorage.setItem('webconsole.localInputMode', localInputMode ? 'on' : 'off');
+            updateLocalInputUI();
+            showToast(localInputMode ? 'Local input ON: sends text on Enter' : 'Live input ON: sends every key');
+            terminal.focus();
+        }
+
+        terminal.onData(data => {
+            if (!handleLocalInput(data)) sendInput(data);
+        });
+        updateLocalInputUI();
+
+        // WebSocket connection
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/${sessionId}`;
+
+            terminal.writeln('\x1b[1;34m[WebConsole]\x1b[0m Connecting...');
+
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                updateConnectionStatus('connected');
+                reconnectAttempts = 0;
+                terminal.writeln('\x1b[1;32m[WebConsole]\x1b[0m Connected. Starting shell...');
+                sendResize();
+                keepAlive();
+            };
+
+            ws.onmessage = (event) => {
+                // Fast path: PTY output arrives as prefixed binary frames.
+                // 0x00 = raw UTF-8/ANSI, 0x01 = zlib deflate compressed.
+                if (event.data instanceof ArrayBuffer) {
+                    const frame = new Uint8Array(event.data);
+                    if (!frame.length) return;
+                    const kind = frame[0];
+                    const payload = frame.subarray(1);
+                    if (kind === 1 && window.pako) {
+                        terminal.write(pako.inflate(payload));
+                    } else {
+                        terminal.write(payload);
+                    }
+                    return;
+                }
+
+                // Slow/control path: tiny JSON messages only.
+                if (typeof event.data === 'string') {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'pong') {
+                            const latency = Date.now() - lastPingTime;
+                            document.getElementById('status-latency').textContent = latency + 'ms';
+                        } else if (msg.type === 'error') {
+                            terminal.writeln('\x1b[1;31m[WebConsole] ' + msg.data + '\x1b[0m');
+                        } else if (msg.type === 'data') {
+                            // Backward compatibility with old server frames.
+                            terminal.write(msg.data);
+                        }
+                    } catch (_) {
+                        terminal.write(event.data);
+                    }
+                }
+            };
+
+            ws.onclose = (e) => {
+                updateConnectionStatus('disconnected');
+                if (e.code !== 1000) {
+                    terminal.writeln(`\x1b[1;31m[WebConsole]\x1b[0m Disconnected (${e.code}). Reconnecting...`);
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        setTimeout(connect, Math.min(1000 * reconnectAttempts, 30000));
+                    }
+                } else {
+                    terminal.writeln('\x1b[1;33m[WebConsole]\x1b[0m Session ended.');
+                }
+            };
+
+            ws.onerror = (e) => {
+                updateConnectionStatus('error');
+                terminal.writeln('\x1b[1;31m[WebConsole]\x1b[0m Connection error');
+            };
+        }
+
+        function updateConnectionStatus(status) {
+            const badge = document.getElementById('connection-badge');
+            const indicator = document.querySelector('#status-connection .indicator');
+            const label = document.querySelector('#status-connection .label');
+
+            badge.className = 'connection-badge ' + status;
+
+            switch (status) {
+                case 'connected':
+                    badge.innerHTML = '<span class="dot"></span> Connected';
+                    indicator.style.background = '#34A853';
+                    label.textContent = 'Connected';
+                    break;
+                case 'disconnected':
+                    badge.innerHTML = '<span class="dot"></span> Disconnected';
+                    indicator.style.background = '#9AA0A6';
+                    label.textContent = 'Disconnected';
+                    break;
+                case 'error':
+                    badge.innerHTML = '<span class="dot"></span> Error';
+                    indicator.style.background = '#EA4335';
+                    label.textContent = 'Error';
+                    break;
+                case 'connecting':
+                    badge.innerHTML = '<span class="dot pulse"></span> Connecting';
+                    indicator.style.background = '#FBBC05';
+                    label.textContent = 'Connecting';
+                    break;
+            }
+        }
+
+        function keepAlive() {
+            setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    lastPingTime = Date.now();
+                    ws.send(JSON.stringify({ type: 'ping' }));
+                }
+            }, 45000);
+
+            // Keep session alive on server; relaxed for bad mobile links.
+            setInterval(() => {
+                fetch(`/api/sessions/${sessionId}/keep-alive`, { method: 'POST' }).catch(() => {});
+            }, 120000);
+        }
+
+        // Connect on load
+        document.addEventListener('DOMContentLoaded', () => {
+            updateConnectionStatus('connecting');
+            connect();
+        });
+
+        // Utility functions
+        function copyLink() {
+            navigator.clipboard.writeText(window.location.href);
+            showToast('Link copied to clipboard');
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                document.exitFullscreen();
+            }
+            setTimeout(scheduleResize, 100);
+        }
+
+        function clearTerminal() {
+            terminal.clear();
+        }
+
+        function killSession() {
+            if (confirm('Kill this session? This cannot be undone.')) {
+                fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
+                    .then(() => window.location.href = '/')
+                    .catch(() => window.location.href = '/');
+            }
+        }
+
+        function showToast(message) {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('fade-out');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // Keyboard shortcuts
+        terminal.attachCustomKeyEventHandler((e) => {
+            // Ctrl+B toggles local/live input mode.
+            if (e.ctrlKey && e.key.toLowerCase() === 'b') {
+                e.preventDefault();
+                toggleLocalInput();
+                return false;
+            }
+            // Ctrl+L to clear
+            if (e.ctrlKey && e.key === 'l') {
+                e.preventDefault();
+                clearTerminal();
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'input', data: '\x0c' }));
+                }
+                return false;
+            }
+            // Ctrl+C
+            if (e.ctrlKey && e.key === 'c' && terminal.hasSelection()) {
+                // Copy selection
+                return true;
+            }
+            return true;
+        });
+    </script>
+</body>
+</html>

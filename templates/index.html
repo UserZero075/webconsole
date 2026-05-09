@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebConsole</title>
+    <link href="https://fonts.googleapis.com/css2?family/Google+Sans:wght@400;500;600&family=Google+Sans+Text:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-left">
+                <span class="material-symbols-outlined logo">terminal</span>
+                <h1>WebConsole</h1>
+            </div>
+            <div class="header-right">
+                <button class="btn btn-primary" onclick="createSession()">
+                    <span class="material-symbols-outlined">add</span>
+                    New Session
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Stats Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <span class="material-symbols-outlined stat-icon">computer</span>
+                    <div class="stat-info">
+                        <span class="stat-value" id="total-sessions">0</span>
+                        <span class="stat-label">Total Sessions</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <span class="material-symbols-outlined stat-icon active">circle</span>
+                    <div class="stat-info">
+                        <span class="stat-value" id="active-sessions">0</span>
+                        <span class="stat-label">Active</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <span class="material-symbols-outlined stat-icon">schedule</span>
+                    <div class="stat-info">
+                        <span class="stat-value" id="uptime">--</span>
+                        <span class="stat-label">Server Uptime</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sessions Table -->
+            <div class="sessions-section">
+                <div class="section-header">
+                    <h2>Sessions</h2>
+                    <button class="btn btn-icon" onclick="refreshSessions()" title="Refresh">
+                        <span class="material-symbols-outlined">refresh</span>
+                    </button>
+                </div>
+
+                <div class="sessions-list" id="sessions-list">
+                    <div class="empty-state">
+                        <span class="material-symbols-outlined">terminal</span>
+                        <p>No sessions yet</p>
+                        <span class="hint">Create a new session to get started</span>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <span>WebConsole • Tailscale-only access</span>
+        </footer>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/js/app.js"></script>
+    <script>
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            refreshSessions();
+            setInterval(refreshSessions, 15000);
+            updateUptime();
+        });
+    </script>
+</body>
+</html>

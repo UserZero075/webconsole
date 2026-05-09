@@ -177,6 +177,72 @@ body.terminal-mode {
     width: 100%;
 }
 
+/* Suggestions / Warp-style previews */
+.suggestion-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 220px;
+    padding: 8px;
+    background: #0b1220;
+    border-top: 1px solid rgba(139, 148, 158, 0.25);
+    box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.35);
+    overflow-y: auto;
+}
+
+.suggestion-panel.hidden {
+    display: none;
+}
+
+.suggestion-title {
+    padding: 2px 8px 6px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.suggestion-item {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.suggestion-item:hover,
+.suggestion-item.selected {
+    background: rgba(88, 166, 255, 0.16);
+    border-color: rgba(88, 166, 255, 0.36);
+}
+
+.suggestion-icon {
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.suggestion-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.suggestion-hint {
+    color: var(--text-secondary);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 11px;
+}
+
 /* Local input composer: DOM-only line buffer. It intentionally lives outside
    xterm so Backspace/Delete never sends destructive CSI edits into TUI screens. */
 .local-input-composer {

@@ -18,6 +18,7 @@ import fcntl
 import termios
 import signal
 import zlib
+import shlex
 from datetime import datetime
 from pathlib import Path
 
@@ -75,6 +76,86 @@ def cleanup_session(session_id):
     for tok, sid in list(session_tokens.items()):
         if sid == session_id:
             del session_tokens[tok]
+
+def resolve_session_cwd(info):
+    """Best-effort cwd for completions without prompt injection."""
+    pid = info.get('pid')
+    if pid:
+        try:
+            cwd = os.readlink(f'/proc/{int(pid)}/cwd')
+            if cwd and os.path.isdir(cwd):
+                info['cwd'] = cwd
+                return cwd
+        except Exception:
+            pass
+    cwd = info.get('cwd') or str(TERMINAL_SESSIONS_DIR)
+    return cwd if os.path.isdir(cwd) else str(TERMINAL_SESSIONS_DIR)
+
+def split_command_context(line, cursor=None):
+    """Return command/token context before cursor for lightweight completion."""
+    if cursor is None:
+        cursor = len(line or '')
+    try:
+        cursor = max(0, min(int(cursor), len(line or '')))
+    except Exception:
+        cursor = len(line or '')
+    before = (line or '')[:cursor]
+    match = re.search(r'([^\s]*)$', before)
+    token = match.group(1) if match else ''
+    token_start = cursor - len(token)
+    try:
+        words = shlex.split(before[:token_start])
+    except ValueError:
+        words = before[:token_start].split()
+    command = words[0] if words else (token if token_start == 0 else '')
+    return {
+        'before': before,
+        'command': command,
+        'token': token,
+        'token_start': token_start,
+        'cursor': cursor,
+    }
+
+def path_completion_items(cwd, token='', dirs_only=False, limit=40):
+    """List filesystem completion candidates for the current token."""
+    token = token or ''
+    expanded = os.path.expanduser(token)
+    if os.path.isabs(expanded):
+        base_dir = os.path.dirname(expanded) or '/'
+        prefix = os.path.basename(expanded)
+        display_prefix = token[:len(token) - len(prefix)]
+    else:
+        base_part = os.path.dirname(expanded)
+        prefix = os.path.basename(expanded)
+        base_dir = os.path.normpath(os.path.join(cwd, base_part)) if base_part else cwd
+        display_prefix = token[:len(token) - len(prefix)]
+
+    items = []
+    try:
+        with os.scandir(base_dir) as entries:
+            for entry in entries:
+                name = entry.name
+                if name.startswith('.') and not prefix.startswith('.'):
+                    continue
+                if prefix and not name.startswith(prefix):
+                    continue
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=True)
+                except OSError:
+                    is_dir = False
+                if dirs_only and not is_dir:
+                    continue
+                value = f"{display_prefix}{name}{'/' if is_dir else ''}"
+                items.append({
+                    'value': value,
+                    'label': value,
+                    'type': 'dir' if is_dir else 'file',
+                })
+    except OSError:
+        return []
+
+    items.sort(key=lambda item: item['value'].lower())
+    return items[:limit]
 
 # ANSI color codes
 ANSI_COLORS = {
@@ -321,6 +402,49 @@ def api_keep_alive(session_id):
     if session_id in terminal_sessions:
         terminal_sessions[session_id]['last_active'] = time.time()
     return jsonify({'success': True})
+
+@app.route('/api/sessions/<session_id>/complete', methods=['POST'])
+def api_complete_session(session_id):
+    session_id = sanitize_session_id(session_id)
+    if not session_id or session_id not in terminal_sessions:
+        return jsonify({'error': 'session not found'}), 404
+
+    payload = request.get_json(silent=True) or {}
+    context = split_command_context(payload.get('line', ''), payload.get('cursor'))
+    command = context['command']
+    path_commands = {'cd': True, 'ls': False, 'cat': False, 'less': False, 'tail': False, 'head': False, 'vim': False, 'nano': False, 'code': False, 'open': False}
+    if command in path_commands and context['token_start'] == 0 and context['token'] == command:
+        # Treat bare `cd` / `ls` as "show candidates after the command".
+        context['token'] = ''
+        context['token_start'] = context['cursor'] + 1
+    if command not in path_commands:
+        return jsonify({
+            'mode': 'none',
+            'items': [],
+            'token': context['token'],
+            'token_start': context['token_start'],
+            'cursor': context['cursor'],
+        })
+
+    info = terminal_sessions[session_id]
+    cwd = resolve_session_cwd(info)
+    dirs_only = path_commands[command]
+    items = path_completion_items(cwd, context['token'], dirs_only=dirs_only)
+    replacement = ''
+    if len(items) == 1:
+        replacement = items[0]['value']
+
+    return jsonify({
+        'mode': 'path',
+        'command': command,
+        'cwd': cwd,
+        'dirs_only': dirs_only,
+        'token': context['token'],
+        'token_start': context['token_start'],
+        'cursor': context['cursor'],
+        'replacement': replacement,
+        'items': items,
+    })
 
 @app.route('/health')
 def health():

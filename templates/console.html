@@ -58,6 +58,9 @@
             <div id="terminal"></div>
         </div>
 
+        <!-- Dark command/path previews, Warp-style, above the active command. -->
+        <div class="suggestion-panel hidden" id="suggestion-panel"></div>
+
         <!-- Local input is rendered outside xterm so edits never mutate TUI output. -->
         <div class="local-input-composer" id="local-input-composer">
             <span class="local-input-label">LOCAL</span>
@@ -192,10 +195,20 @@
         let localInputMode = localStorage.getItem('webconsole.localInputMode') !== 'off';
         let localBuffer = '';
         let localCursor = 0;
+        let liveBuffer = '';
+        let liveCursor = 0;
+        let suggestionItems = [];
+        let suggestionMode = 'none';
+        let selectedSuggestionIndex = 0;
+        let suggestionTimer = null;
+        let latestPathRequest = 0;
+        let commandHistory = JSON.parse(localStorage.getItem('webconsole.commandHistory') || '[]');
 
         const localComposer = document.getElementById('local-input-composer');
         const localInputBefore = document.getElementById('local-input-before');
         const localInputAfter = document.getElementById('local-input-after');
+        const suggestionPanel = document.getElementById('suggestion-panel');
+        const pathCommands = new Set(['cd', 'ls', 'cat', 'less', 'tail', 'head', 'vim', 'nano', 'code', 'open']);
 
         function sendInput(data) {
             if (ws && ws.readyState === WebSocket.OPEN) {
@@ -212,11 +225,194 @@
             return data && !/[\x00-\x1f\x7f\x1b]/.test(data);
         }
 
+        function getActiveLine() {
+            return localInputMode ? localBuffer : liveBuffer;
+        }
+
+        function getActiveCursor() {
+            return localInputMode ? localCursor : liveCursor;
+        }
+
+        function setActiveLine(line, cursor = line.length) {
+            if (localInputMode) {
+                localBuffer = line;
+                localCursor = Math.max(0, Math.min(cursor, localBuffer.length));
+                renderLocalInput();
+            } else {
+                // Live mode mirrors the shell line. Bash/readline understands Ctrl+A/Ctrl+K.
+                sendInput('\x01\x0b' + line);
+                liveBuffer = line;
+                liveCursor = Math.max(0, Math.min(cursor, liveBuffer.length));
+            }
+        }
+
+        function saveCommandHistory(line) {
+            const command = (line || '').trim();
+            if (!command) return;
+            commandHistory = commandHistory.filter(item => item !== command);
+            commandHistory.unshift(command);
+            commandHistory = commandHistory.slice(0, 120);
+            localStorage.setItem('webconsole.commandHistory', JSON.stringify(commandHistory));
+        }
+
+        function getLineContext(line = getActiveLine(), cursor = getActiveCursor()) {
+            const before = line.slice(0, cursor);
+            const tokenMatch = before.match(/([^\s]*)$/);
+            const token = tokenMatch ? tokenMatch[1] : '';
+            const tokenStart = cursor - token.length;
+            const wordsBeforeToken = before.slice(0, tokenStart).trim().split(/\s+/).filter(Boolean);
+            const command = wordsBeforeToken[0] || (tokenStart === 0 ? token : '');
+            return { before, command, token, tokenStart, cursor };
+        }
+
+        function isPathCompletionContext(line = getActiveLine(), cursor = getActiveCursor()) {
+            const ctx = getLineContext(line, cursor);
+            const trimmed = line.trim();
+            return pathCommands.has(ctx.command) && (ctx.tokenStart > 0 || line.endsWith(' ') || trimmed === ctx.command);
+        }
+
+        function getCommandSuggestions(line = getActiveLine()) {
+            const prefix = line.trimStart().toLowerCase();
+            if (!prefix || isPathCompletionContext()) return [];
+            return commandHistory
+                .filter(command => command.toLowerCase().startsWith(prefix) && command !== line.trim())
+                .slice(0, 8)
+                .map(command => ({ mode: 'command', type: 'history', value: command, label: command }));
+        }
+
+        function hideSuggestions() {
+            suggestionItems = [];
+            suggestionMode = 'none';
+            selectedSuggestionIndex = 0;
+            suggestionPanel.classList.add('hidden');
+            suggestionPanel.replaceChildren();
+        }
+
+        function showSuggestionPanel(items, mode) {
+            suggestionItems = items || [];
+            suggestionMode = mode || 'none';
+            selectedSuggestionIndex = Math.min(selectedSuggestionIndex, Math.max(0, suggestionItems.length - 1));
+            suggestionPanel.replaceChildren();
+            if (!suggestionItems.length) {
+                hideSuggestions();
+                return;
+            }
+
+            const title = document.createElement('div');
+            title.className = 'suggestion-title';
+            title.textContent = mode === 'path' ? 'Rutas disponibles' : 'Comandos recientes similares';
+            suggestionPanel.appendChild(title);
+
+            suggestionItems.forEach((item, index) => {
+                const row = document.createElement('button');
+                row.type = 'button';
+                row.className = 'suggestion-item' + (index === selectedSuggestionIndex ? ' selected' : '');
+                row.onclick = () => applyCompletion(item);
+
+                const icon = document.createElement('span');
+                icon.className = 'suggestion-icon ' + (item.type || item.mode || 'command');
+                icon.textContent = item.type === 'dir' ? '📁' : (item.type === 'file' ? '◼' : '↺');
+
+                const label = document.createElement('span');
+                label.className = 'suggestion-label';
+                label.textContent = item.label || item.value;
+
+                const hint = document.createElement('span');
+                hint.className = 'suggestion-hint';
+                hint.textContent = index === selectedSuggestionIndex ? 'Tab completa' : '';
+
+                row.append(icon, label, hint);
+                suggestionPanel.appendChild(row);
+            });
+            suggestionPanel.classList.remove('hidden');
+        }
+
+        async function fetchPathSuggestions(line = getActiveLine(), cursor = getActiveCursor()) {
+            const requestId = ++latestPathRequest;
+            const trimmed = line.trim();
+            const queryLine = pathCommands.has(trimmed) && !/\s/.test(line) ? line + ' ' : line;
+            const queryCursor = queryLine.length !== line.length ? cursor + 1 : cursor;
+            const response = await fetch(`/api/sessions/${sessionId}/complete`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ line: queryLine, cursor: queryCursor }),
+            });
+            if (!response.ok || requestId !== latestPathRequest) return null;
+            return response.json();
+        }
+
+        async function refreshSuggestions() {
+            clearTimeout(suggestionTimer);
+            const line = getActiveLine();
+            const cursor = getActiveCursor();
+            if (!line.trim()) {
+                hideSuggestions();
+                return;
+            }
+            if (isPathCompletionContext(line, cursor)) {
+                try {
+                    const data = await fetchPathSuggestions(line, cursor);
+                    if (!data || data.mode !== 'path') return;
+                    const items = (data.items || []).map(item => ({ ...item, mode: 'path', tokenStart: data.token_start, token: data.token }));
+                    showSuggestionPanel(items, 'path');
+                } catch (_) {
+                    hideSuggestions();
+                }
+                return;
+            }
+            showSuggestionPanel(getCommandSuggestions(line), 'command');
+        }
+
+        function scheduleSuggestions() {
+            clearTimeout(suggestionTimer);
+            suggestionTimer = setTimeout(refreshSuggestions, 90);
+        }
+
+        function selectSuggestion(delta) {
+            if (!suggestionItems.length) return false;
+            selectedSuggestionIndex = (selectedSuggestionIndex + delta + suggestionItems.length) % suggestionItems.length;
+            showSuggestionPanel(suggestionItems, suggestionMode);
+            return true;
+        }
+
+        function completedLineForItem(item) {
+            const line = getActiveLine();
+            const cursor = getActiveCursor();
+            if (item.mode === 'command' || suggestionMode === 'command') {
+                return { line: item.value, cursor: item.value.length };
+            }
+            const ctx = getLineContext(line, cursor);
+            const rawTokenStart = item.tokenStart ?? ctx.tokenStart;
+            const tokenStart = Math.min(rawTokenStart, line.length);
+            const spacer = rawTokenStart > line.length && !line.endsWith(' ') ? ' ' : '';
+            const value = item.value || '';
+            const next = line.slice(0, tokenStart) + spacer + value + line.slice(cursor);
+            return { line: next, cursor: tokenStart + spacer.length + value.length };
+        }
+
+        function applyCompletion(item = suggestionItems[selectedSuggestionIndex]) {
+            if (!item) return false;
+            const next = completedLineForItem(item);
+            setActiveLine(next.line, next.cursor);
+            hideSuggestions();
+            scheduleSuggestions();
+            terminal.focus();
+            return true;
+        }
+
+        async function handleTabCompletion() {
+            if (!suggestionItems.length) {
+                await refreshSuggestions();
+            }
+            if (suggestionItems.length) {
+                applyCompletion(suggestionItems[selectedSuggestionIndex] || suggestionItems[0]);
+                return true;
+            }
+            return true;
+        }
+
         function renderLocalInput() {
-            // Root cause of the OpenCode UI corruption: local echo used xterm CSI
-            // edits (DCH/EL/ICH) on the real terminal buffer. Full-screen TUIs own
-            // that buffer, so deleting local text could shift/redraw their UI.
-            // Keep every local edit in DOM only; xterm receives nothing until Enter.
+            // Local input is DOM-only. xterm receives no local edits until Enter.
             localInputBefore.textContent = localBuffer.slice(0, localCursor);
             localInputAfter.textContent = localBuffer.slice(localCursor);
         }
@@ -226,6 +422,7 @@
             localBuffer = localBuffer.slice(0, localCursor) + text + localBuffer.slice(localCursor);
             localCursor += text.length;
             renderLocalInput();
+            scheduleSuggestions();
         }
 
         function deleteLocalVisual(count) {
@@ -234,6 +431,7 @@
             localBuffer = localBuffer.slice(0, localCursor - count) + localBuffer.slice(localCursor);
             localCursor -= count;
             renderLocalInput();
+            scheduleSuggestions();
         }
 
         function deleteLocalForward(count) {
@@ -241,20 +439,30 @@
             count = Math.min(count, localBuffer.length - localCursor);
             localBuffer = localBuffer.slice(0, localCursor) + localBuffer.slice(localCursor + count);
             renderLocalInput();
+            scheduleSuggestions();
         }
 
         function clearLocalBufferVisual() {
             localBuffer = '';
             localCursor = 0;
             renderLocalInput();
+            hideSuggestions();
         }
 
         function handleLocalInput(data) {
             if (!localInputMode) return false;
 
+            if (data === '\t') {
+                handleTabCompletion();
+                return true;
+            }
+            if (data === '\x1b[A') return selectSuggestion(-1);
+            if (data === '\x1b[B') return selectSuggestion(1);
+
             // Enter: remove local echo, then send exactly one completed line.
             if (data === '\r' || data === '\n' || data === '\r\n') {
                 const line = localBuffer;
+                saveCommandHistory(line);
                 clearLocalBufferVisual();
                 sendInput(line + '\r');
                 return true;
@@ -281,17 +489,20 @@
             if (data === '\x01') { // Ctrl+A
                 localCursor = 0;
                 renderLocalInput();
+                scheduleSuggestions();
                 return true;
             }
             if (data === '\x05') { // Ctrl+E
                 localCursor = localBuffer.length;
                 renderLocalInput();
+                scheduleSuggestions();
                 return true;
             }
             if (data === '\x1b[D') { // Left
                 if (localCursor > 0) {
                     localCursor--;
                     renderLocalInput();
+                    scheduleSuggestions();
                 }
                 return true;
             }
@@ -299,6 +510,7 @@
                 if (localCursor < localBuffer.length) {
                     localCursor++;
                     renderLocalInput();
+                    scheduleSuggestions();
                 }
                 return true;
             }
@@ -313,7 +525,76 @@
                 return true;
             }
 
-            // Other controls (Ctrl+C, Ctrl+D, ESC, Up/Down history, Tab) pass through.
+            // Other controls (Ctrl+C, Ctrl+D, ESC) pass through.
+            hideSuggestions();
+            return false;
+        }
+
+        function handleLiveInput(data) {
+            if (localInputMode) return false;
+            if (data === '\t') {
+                handleTabCompletion();
+                return true;
+            }
+            if (suggestionItems.length && data === '\x1b[A') return selectSuggestion(-1);
+            if (suggestionItems.length && data === '\x1b[B') return selectSuggestion(1);
+            if (data === '\r' || data === '\n' || data === '\r\n') {
+                saveCommandHistory(liveBuffer);
+                liveBuffer = '';
+                liveCursor = 0;
+                hideSuggestions();
+                return false;
+            }
+            if (data === '\x7f' || data === '\b') {
+                if (liveCursor > 0) {
+                    liveBuffer = liveBuffer.slice(0, liveCursor - 1) + liveBuffer.slice(liveCursor);
+                    liveCursor--;
+                    scheduleSuggestions();
+                }
+                return false;
+            }
+            if (data === '\x15') { // Ctrl+U
+                liveBuffer = liveBuffer.slice(liveCursor);
+                liveCursor = 0;
+                scheduleSuggestions();
+                return false;
+            }
+            if (data === '\x01') { // Ctrl+A
+                liveCursor = 0;
+                scheduleSuggestions();
+                return false;
+            }
+            if (data === '\x05') { // Ctrl+E
+                liveCursor = liveBuffer.length;
+                scheduleSuggestions();
+                return false;
+            }
+            if (data === '\x1b[D') {
+                if (liveCursor > 0) liveCursor--;
+                scheduleSuggestions();
+                return false;
+            }
+            if (data === '\x1b[C') {
+                if (liveCursor < liveBuffer.length) liveCursor++;
+                scheduleSuggestions();
+                return false;
+            }
+            if (data === '\x1b[3~') {
+                if (liveCursor < liveBuffer.length) liveBuffer = liveBuffer.slice(0, liveCursor) + liveBuffer.slice(liveCursor + 1);
+                scheduleSuggestions();
+                return false;
+            }
+            if (isPrintableText(data)) {
+                liveBuffer = liveBuffer.slice(0, liveCursor) + data + liveBuffer.slice(liveCursor);
+                liveCursor += data.length;
+                scheduleSuggestions();
+                return false;
+            }
+            if (data === '\x03' || data === '\x04') { // Ctrl+C / Ctrl+D
+                liveBuffer = '';
+                liveCursor = 0;
+                hideSuggestions();
+            }
             return false;
         }
 
@@ -322,13 +603,14 @@
             document.getElementById('local-input-btn').classList.toggle('active', localInputMode);
             localComposer.classList.toggle('hidden', !localInputMode);
             renderLocalInput();
+            hideSuggestions();
             setTimeout(scheduleResize, 0);
         }
 
         function toggleLocalInput() {
-            if (localBuffer) {
-                clearLocalBufferVisual();
-            }
+            clearLocalBufferVisual();
+            liveBuffer = '';
+            liveCursor = 0;
             localInputMode = !localInputMode;
             localStorage.setItem('webconsole.localInputMode', localInputMode ? 'on' : 'off');
             updateLocalInputUI();
@@ -337,7 +619,7 @@
         }
 
         terminal.onData(data => {
-            if (!handleLocalInput(data)) sendInput(data);
+            if (!handleLocalInput(data) && !handleLiveInput(data)) sendInput(data);
         });
         updateLocalInputUI();
 

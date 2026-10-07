@@ -28,6 +28,7 @@ app = Flask(__name__,
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(32).hex())
 
 sock = Sock(app)
+SERVER_STARTED_MONOTONIC = time.monotonic()
 
 # Session storage
 terminal_sessions = {}
@@ -202,7 +203,7 @@ def terminal_ws(ws, session_id):
                 env['COLORTERM'] = 'truecolor'
                 env['LANG'] = 'en_US.UTF-8'
                 env['LC_ALL'] = env.get('LC_ALL', 'en_US.UTF-8')
-                env['PATH'] = '/home/nanoclaw/.local/bin:' + env.get('PATH', '')
+                env['PATH'] = str(Path.home() / '.local' / 'bin') + ':' + env.get('PATH', '')
                 os.execvpe('bash', ['bash', '-l'], env)
 
             os.close(slave_fd)
@@ -224,6 +225,7 @@ def terminal_ws(ws, session_id):
             return
 
     info = terminal_sessions[session_id]
+    info['last_active'] = time.time()
     master_fd = info['master_fd']
     stop = threading.Event()
     send_lock = threading.Lock()
@@ -328,8 +330,9 @@ def terminal_ws(ws, session_id):
                 break
     finally:
         stop.set()
-        # Keep the old behavior: closing browser tab kills the PTY session.
-        cleanup_session(session_id)
+        # Keep the PTY and token so a refreshed browser can reconnect to this shell.
+        if terminal_sessions.get(session_id) is info:
+            info['last_active'] = time.time()
 
 # Routes
 @app.route('/')
@@ -448,7 +451,12 @@ def api_complete_session(session_id):
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'sessions': len(terminal_sessions)})
+    uptime_seconds = max(0, int(time.monotonic() - SERVER_STARTED_MONOTONIC))
+    return jsonify({
+        'status': 'ok',
+        'sessions': len(terminal_sessions),
+        'uptime_seconds': uptime_seconds,
+    })
 
 # Static
 @app.route('/static/<path:filename>')
@@ -468,5 +476,7 @@ if __name__ == '__main__':
     cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
     cleanup_thread.start()
 
-    # Run on all interfaces (Tailscale firewall handles access control)
-    app.run(host='0.0.0.0', port=3030, debug=False, threaded=True)
+    # Bind locally; Tailscale Serve is the only intended network entry point.
+    app.run(host=os.environ.get('HOST', '127.0.0.1'),
+            port=int(os.environ.get('PORT', '3030')),
+            debug=False, threaded=True)

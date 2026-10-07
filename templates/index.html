@@ -79,12 +79,14 @@
     <!-- Toast Notifications -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=server-uptime"></script>
     <script>
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             refreshSessions();
             setInterval(refreshSessions, 15000);
+            refreshUptime();
+            setInterval(refreshUptime, 15000);
             updateUptime();
         });
     </script>

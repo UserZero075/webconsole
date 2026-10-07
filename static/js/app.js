@@ -1,6 +1,7 @@
 // WebConsole Dashboard JavaScript
 
-let startTime = Date.now();
+let serverUptimeSeconds = 0;
+let uptimeSyncedAt = performance.now();
 
 function refreshSessions() {
     fetch('/api/sessions')
@@ -132,8 +133,21 @@ function showToast(message) {
     }, 3000);
 }
 
+function refreshUptime() {
+    fetch('/health')
+        .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json();
+        })
+        .then(data => {
+            serverUptimeSeconds = Math.max(0, Number(data.uptime_seconds) || 0);
+            uptimeSyncedAt = performance.now();
+        })
+        .catch(err => console.error('Failed to refresh server uptime:', err));
+}
+
 function updateUptime() {
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const elapsed = serverUptimeSeconds + Math.floor((performance.now() - uptimeSyncedAt) / 1000);
     const hours = Math.floor(elapsed / 3600);
     const minutes = Math.floor((elapsed % 3600) / 60);
     const seconds = elapsed % 60;

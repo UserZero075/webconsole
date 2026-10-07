@@ -1,0 +1,24 @@
+[Unit]
+Description=WebConsole terminal (loopback, exposed only through Tailscale Serve)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/webconsole
+Environment=PYTHONUNBUFFERED=1
+Environment=HOST=127.0.0.1
+Environment=PORT=3030
+ExecStart=%h/Projects/webconsole/.venv/bin/python %h/Projects/webconsole/app/server.py
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+RestrictSUIDSGID=yes
+TasksMax=128
+
+[Install]
+WantedBy=default.target

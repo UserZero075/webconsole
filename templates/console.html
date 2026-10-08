@@ -106,12 +106,17 @@
     <script src="/static/js/lib/xterm-addon-web-links-090.js"></script>
     <script src="/static/js/lib/pako-210.min.js"></script>
     <script>
-        const sessionId = '{{ session_id }}';
-        const token = '{{ token }}';
+        const sessionId = {{ session_id | tojson }};
+        const token = {{ token | tojson }};
 
         let ws = null;
         let reconnectAttempts = 0;
-        const maxReconnectAttempts = 10;
+        let reconnectTimer = null;
+        let heartbeatTimer = null;
+        let lastResponseAt = 0;
+        let sessionEnded = false;
+        let terminalReady = false;
+        let transportReady = false;
         let lastPingTime = 0;
 
         // Initialize xterm
@@ -166,7 +171,7 @@
         let resizeTimer = null;
         function sendResize() {
             const dims = fitAddon.proposeDimensions();
-            if (!dims) return;
+            if (!dims || document.hidden || dims.cols < 20 || dims.rows < 5) return;
             document.getElementById('status-cols').textContent = dims.cols;
             document.getElementById('status-rows').textContent = dims.rows;
             if (ws && ws.readyState === WebSocket.OPEN) {
@@ -176,6 +181,7 @@
         function scheduleResize() {
             clearTimeout(resizeTimer);
             resizeTimer = setTimeout(() => {
+                if (document.hidden) return;
                 fitAddon.fit();
                 sendResize();
             }, 80);
@@ -192,7 +198,7 @@
         // the completed line on Enter. This removes keystroke-by-keystroke lag
         // on bad links while still allowing raw control keys to pass through.
         const encoder = new TextEncoder();
-        let localInputMode = localStorage.getItem('webconsole.localInputMode') !== 'off';
+        let localInputMode = localStorage.getItem('webconsole.localInputMode') === 'on';
         let localBuffer = '';
         let localCursor = 0;
         let liveBuffer = '';
@@ -202,7 +208,12 @@
         let selectedSuggestionIndex = 0;
         let suggestionTimer = null;
         let latestPathRequest = 0;
-        let commandHistory = JSON.parse(localStorage.getItem('webconsole.commandHistory') || '[]');
+        let commandHistory = [];
+        try {
+            const saved = JSON.parse(sessionStorage.getItem('webconsole.commandHistory') || '[]');
+            if (Array.isArray(saved)) commandHistory = saved.filter(item => typeof item === 'string').slice(0, 120);
+        } catch (_) {}
+        localStorage.removeItem('webconsole.commandHistory');
 
         const localComposer = document.getElementById('local-input-composer');
         const localInputBefore = document.getElementById('local-input-before');
@@ -211,7 +222,7 @@
         const pathCommands = new Set(['cd', 'ls', 'cat', 'less', 'tail', 'head', 'vim', 'nano', 'code', 'open']);
 
         function sendInput(data) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
+            if (transportReady && ws && ws.readyState === WebSocket.OPEN) {
                 try {
                     ws.send(encoder.encode(data));
                 } catch (_) {
@@ -252,7 +263,7 @@
             commandHistory = commandHistory.filter(item => item !== command);
             commandHistory.unshift(command);
             commandHistory = commandHistory.slice(0, 120);
-            localStorage.setItem('webconsole.commandHistory', JSON.stringify(commandHistory));
+            sessionStorage.setItem('webconsole.commandHistory', JSON.stringify(commandHistory));
         }
 
         function getLineContext(line = getActiveLine(), cursor = getActiveCursor()) {
@@ -334,7 +345,7 @@
             const queryCursor = queryLine.length !== line.length ? cursor + 1 : cursor;
             const response = await fetch(`/api/sessions/${sessionId}/complete`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-WebConsole': '1' },
                 body: JSON.stringify({ line: queryLine, cursor: queryCursor }),
             });
             if (!response.ok || requestId !== latestPathRequest) return null;
@@ -530,74 +541,6 @@
             return false;
         }
 
-        function handleLiveInput(data) {
-            if (localInputMode) return false;
-            if (data === '\t') {
-                handleTabCompletion();
-                return true;
-            }
-            if (suggestionItems.length && data === '\x1b[A') return selectSuggestion(-1);
-            if (suggestionItems.length && data === '\x1b[B') return selectSuggestion(1);
-            if (data === '\r' || data === '\n' || data === '\r\n') {
-                saveCommandHistory(liveBuffer);
-                liveBuffer = '';
-                liveCursor = 0;
-                hideSuggestions();
-                return false;
-            }
-            if (data === '\x7f' || data === '\b') {
-                if (liveCursor > 0) {
-                    liveBuffer = liveBuffer.slice(0, liveCursor - 1) + liveBuffer.slice(liveCursor);
-                    liveCursor--;
-                    scheduleSuggestions();
-                }
-                return false;
-            }
-            if (data === '\x15') { // Ctrl+U
-                liveBuffer = liveBuffer.slice(liveCursor);
-                liveCursor = 0;
-                scheduleSuggestions();
-                return false;
-            }
-            if (data === '\x01') { // Ctrl+A
-                liveCursor = 0;
-                scheduleSuggestions();
-                return false;
-            }
-            if (data === '\x05') { // Ctrl+E
-                liveCursor = liveBuffer.length;
-                scheduleSuggestions();
-                return false;
-            }
-            if (data === '\x1b[D') {
-                if (liveCursor > 0) liveCursor--;
-                scheduleSuggestions();
-                return false;
-            }
-            if (data === '\x1b[C') {
-                if (liveCursor < liveBuffer.length) liveCursor++;
-                scheduleSuggestions();
-                return false;
-            }
-            if (data === '\x1b[3~') {
-                if (liveCursor < liveBuffer.length) liveBuffer = liveBuffer.slice(0, liveCursor) + liveBuffer.slice(liveCursor + 1);
-                scheduleSuggestions();
-                return false;
-            }
-            if (isPrintableText(data)) {
-                liveBuffer = liveBuffer.slice(0, liveCursor) + data + liveBuffer.slice(liveCursor);
-                liveCursor += data.length;
-                scheduleSuggestions();
-                return false;
-            }
-            if (data === '\x03' || data === '\x04') { // Ctrl+C / Ctrl+D
-                liveBuffer = '';
-                liveCursor = 0;
-                hideSuggestions();
-            }
-            return false;
-        }
-
         function updateLocalInputUI() {
             document.getElementById('status-input-mode').textContent = localInputMode ? 'Local' : 'Live';
             document.getElementById('local-input-btn').classList.toggle('active', localInputMode);
@@ -619,79 +562,93 @@
         }
 
         terminal.onData(data => {
-            if (!handleLocalInput(data) && !handleLiveInput(data)) sendInput(data);
+            if (!transportReady) return;
+            // Live mode must pass every key and terminal response through to TUIs.
+            if (!handleLocalInput(data)) sendInput(data);
         });
         updateLocalInputUI();
 
-        // WebSocket connection
+        // One socket and one heartbeat per tab. tmux redraws the screen on attach.
         function connect() {
+            if (sessionEnded || (ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(ws.readyState))) return;
+            clearTimeout(reconnectTimer);
+            updateConnectionStatus('connecting');
+            terminalReady = false;
+            transportReady = false;
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws/${sessionId}`;
+            const dims = fitAddon.proposeDimensions() || {cols: 120, rows: 30};
+            const query = new URLSearchParams({token, cols: Math.max(20, dims.cols), rows: Math.max(5, dims.rows)});
+            const socket = new WebSocket(`${protocol}//${window.location.host}/ws/${sessionId}?${query}`);
+            ws = socket;
+            socket.binaryType = 'arraybuffer';
+            lastResponseAt = Date.now();
 
-            terminal.writeln('\x1b[1;34m[WebConsole]\x1b[0m Connecting...');
-
-            ws = new WebSocket(wsUrl);
-            ws.binaryType = 'arraybuffer';
-
-            ws.onopen = () => {
-                updateConnectionStatus('connected');
-                reconnectAttempts = 0;
-                terminal.writeln('\x1b[1;32m[WebConsole]\x1b[0m Connected. Starting shell...');
-                sendResize();
-                keepAlive();
+            socket.onopen = () => {
+                if (ws !== socket) return;
+                // Connection is ready only after the terminal receives its redraw.
+                terminal.reset();
+                lastResponseAt = Date.now();
             };
-
-            ws.onmessage = (event) => {
-                // Fast path: PTY output arrives as prefixed binary frames.
-                // 0x00 = raw UTF-8/ANSI, 0x01 = zlib deflate compressed.
+            socket.onmessage = event => {
+                if (ws !== socket) return;
+                lastResponseAt = Date.now();
                 if (event.data instanceof ArrayBuffer) {
-                    const frame = new Uint8Array(event.data);
-                    if (!frame.length) return;
-                    const kind = frame[0];
-                    const payload = frame.subarray(1);
-                    if (kind === 1 && window.pako) {
-                        terminal.write(pako.inflate(payload));
-                    } else {
-                        terminal.write(payload);
+                    try {
+                        const frame = new Uint8Array(event.data);
+                        if (!frame.length) return;
+                        if (frame[0] !== 0 && frame[0] !== 1) throw new Error('Invalid terminal frame');
+                        const payload = frame[0] === 1 ? pako.inflate(frame.subarray(1)) : frame.subarray(1);
+                        terminal.write(payload, () => {
+                            if (ws !== socket) return;
+                            if (!terminalReady) {
+                                terminalReady = true;
+                                reconnectAttempts = 0;
+                                updateConnectionStatus('connected');
+                                sendResize();
+                            }
+                        });
+                    } catch (_) {
+                        showToast('Error al recuperar la terminal; reconectando');
+                        socket.close();
                     }
                     return;
                 }
-
-                // Slow/control path: tiny JSON messages only.
-                if (typeof event.data === 'string') {
-                    try {
-                        const msg = JSON.parse(event.data);
-                        if (msg.type === 'pong') {
-                            const latency = Date.now() - lastPingTime;
-                            document.getElementById('status-latency').textContent = latency + 'ms';
-                        } else if (msg.type === 'error') {
-                            terminal.writeln('\x1b[1;31m[WebConsole] ' + msg.data + '\x1b[0m');
-                        } else if (msg.type === 'data') {
-                            // Backward compatibility with old server frames.
-                            terminal.write(msg.data);
-                        }
-                    } catch (_) {
-                        terminal.write(event.data);
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'ready') {
+                        transportReady = true;
+                    } else if (msg.type === 'pong') {
+                        document.getElementById('status-latency').textContent = (Date.now() - lastPingTime) + 'ms';
+                    } else if (msg.type === 'ended') {
+                        sessionEnded = true;
+                        showToast('La sesión terminó. Crea otra desde el panel.');
+                        socket.close();
+                    } else if (msg.type === 'error') {
+                        showToast(msg.data);
+                        socket.close();
                     }
+                } catch (_) {
+                    socket.close();
                 }
             };
-
-            ws.onclose = (e) => {
+            socket.onclose = event => {
+                if (ws !== socket) return;
+                ws = null;
+                terminalReady = false;
+                transportReady = false;
                 updateConnectionStatus('disconnected');
-                if (e.code !== 1000) {
-                    terminal.writeln(`\x1b[1;31m[WebConsole]\x1b[0m Disconnected (${e.code}). Reconnecting...`);
-                    if (reconnectAttempts < maxReconnectAttempts) {
-                        reconnectAttempts++;
-                        setTimeout(connect, Math.min(1000 * reconnectAttempts, 30000));
-                    }
-                } else {
-                    terminal.writeln('\x1b[1;33m[WebConsole]\x1b[0m Session ended.');
+                if (event.code === 1008) {
+                    sessionEnded = true;
+                    showToast('Sesión no disponible o límite de conexiones alcanzado.');
+                }
+                if (!sessionEnded) {
+                    reconnectAttempts++;
+                    const delay = Math.min(1000 * 2 ** Math.min(reconnectAttempts - 1, 5), 30000);
+                    reconnectTimer = setTimeout(connect, delay + Math.random() * 500);
                 }
             };
-
-            ws.onerror = (e) => {
-                updateConnectionStatus('error');
-                terminal.writeln('\x1b[1;31m[WebConsole]\x1b[0m Connection error');
+            socket.onerror = () => {
+                if (ws === socket) updateConnectionStatus('error');
             };
         }
 
@@ -726,24 +683,47 @@
             }
         }
 
-        function keepAlive() {
-            setInterval(() => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    lastPingTime = Date.now();
-                    ws.send(JSON.stringify({ type: 'ping' }));
-                }
-            }, 45000);
-
-            // Keep session alive on server; relaxed for bad mobile links.
-            setInterval(() => {
-                fetch(`/api/sessions/${sessionId}/keep-alive`, { method: 'POST' }).catch(() => {});
-            }, 120000);
+        function checkConnection() {
+            if (sessionEnded) return;
+            if (!ws || ws.readyState === WebSocket.CLOSED) {
+                connect();
+                return;
+            }
+            if (Date.now() - lastResponseAt > 75000) {
+                // Invalidate stale handlers so an old socket cannot change the new one.
+                const stale = ws;
+                ws = null;
+                stale.close();
+                connect();
+                return;
+            }
+            if (ws.readyState === WebSocket.OPEN) {
+                lastPingTime = Date.now();
+                ws.send(JSON.stringify({type: 'ping'}));
+            }
         }
 
-        // Connect on load
         document.addEventListener('DOMContentLoaded', () => {
-            updateConnectionStatus('connecting');
             connect();
+            heartbeatTimer = setInterval(checkConnection, 25000);
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                checkConnection();
+                scheduleResize();
+            }
+        });
+        window.addEventListener('online', checkConnection);
+        window.addEventListener('pageshow', event => {
+            if (event.persisted) checkConnection();
+        });
+        window.addEventListener('pagehide', () => {
+            clearTimeout(reconnectTimer);
+            if (ws) {
+                const socket = ws;
+                ws = null;
+                socket.close();
+            }
         });
 
         // Utility functions
@@ -767,9 +747,12 @@
 
         function killSession() {
             if (confirm('Kill this session? This cannot be undone.')) {
-                fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
-                    .then(() => window.location.href = '/')
-                    .catch(() => window.location.href = '/');
+                fetch(`/api/sessions/${sessionId}`, { method: 'DELETE', headers: {'X-WebConsole': '1'} })
+                    .then(response => {
+                        if (!response.ok) throw new Error('Unable to delete session');
+                        window.location.href = '/';
+                    })
+                    .catch(() => showToast('No se pudo cerrar la sesión. Inténtalo de nuevo.'));
             }
         }
 

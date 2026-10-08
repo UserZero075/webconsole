@@ -3,7 +3,7 @@ WebConsole Server - Tailscale-only web terminal
 Minimal, Material You design, Google-style aesthetics
 """
 
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, abort, session, Response
 from flask_sock import Sock
 import os
 import uuid
@@ -12,20 +12,35 @@ import time
 import threading
 import re
 import pty
+import subprocess
+import shutil
+import secrets
+import hmac
+from urllib.parse import urlsplit
 import select
 import struct
 import fcntl
 import termios
-import signal
 import zlib
 import shlex
+import sys
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from telemetry import Telemetry
 
 app = Flask(__name__,
             static_folder=str(Path(__file__).parent.parent / 'static'),
             template_folder=str(Path(__file__).parent.parent / 'templates'))
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(32).hex())
+app.config.update(
+    SECRET_KEY=os.environ.get('SECRET_KEY', secrets.token_hex(32)),
+    MAX_CONTENT_LENGTH=65536,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Strict',
+    SESSION_COOKIE_SECURE=os.environ.get('COOKIE_SECURE', '0') == '1',
+    SOCK_SERVER_OPTIONS={'ping_interval': 25, 'max_message_size': 65536},
+)
 
 sock = Sock(app)
 SERVER_STARTED_MONOTONIC = time.monotonic()
@@ -34,61 +49,152 @@ SERVER_STARTED_MONOTONIC = time.monotonic()
 terminal_sessions = {}
 session_tokens = {}
 
-TERMINAL_SESSIONS_DIR = Path(__file__).parent / 'sessions'
-TERMINAL_SESSIONS_DIR.mkdir(exist_ok=True)
+TERMINAL_SESSIONS_DIR = Path(os.environ.get('WEBCONSOLE_STATE_DIR', str(Path(__file__).parent / 'sessions')))
+TERMINAL_SESSIONS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+TERMINAL_SESSIONS_DIR.chmod(0o700)
+TMUX_SOCKET = str(TERMINAL_SESSIONS_DIR / 'tmux.sock')
+TMUX_BIN = shutil.which('tmux')
+SESSIONS_LOCK = threading.RLock()
+MAX_SESSIONS = int(os.environ.get('MAX_SESSIONS', '32'))
+MAX_CLIENTS = 4
+
 
 def generate_token():
-    return uuid.uuid4().hex + uuid.uuid4().hex[:12]
+    return secrets.token_urlsafe(32)
+
 
 def sanitize_session_id(sid):
-    if not sid or len(sid) > 64:
-        return None
-    return re.sub(r'[^a-zA-Z0-9_-]', '', sid)
+    return sid if isinstance(sid, str) and re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', sid) else None
+
+
+def tmux_command(*args, check=True):
+    if not TMUX_BIN:
+        raise RuntimeError('tmux is required: install tmux before starting WebConsole')
+    env = os.environ.copy()
+    env.pop('TMUX', None)
+    env['PATH'] = str(Path.home() / '.local' / 'bin') + ':' + env.get('PATH', '')
+    return subprocess.run([TMUX_BIN, '-S', TMUX_SOCKET, '-f', str(Path(__file__).with_name('tmux.conf')), *args],
+                          capture_output=True, text=True, timeout=5, check=check, env=env)
+
+
+def persist_session(sid, info):
+    path = TERMINAL_SESSIONS_DIR / f'{sid}.json'
+    temporary = path.with_suffix('.tmp')
+    with temporary.open('w') as file:
+        os.chmod(temporary, 0o600)
+        json.dump({key: info[key] for key in ('created_at', 'last_active', 'session_token', 'cols', 'rows', 'cwd', 'title', 'launcher', 'notification', 'dismissed_notification') if key in info}, file)
+    temporary.replace(path)
+
+
+def load_sessions():
+    for path in TERMINAL_SESSIONS_DIR.glob('*.json'):
+        if not sanitize_session_id(path.stem):
+            continue
+        try:
+            info = json.loads(path.read_text())
+            if not isinstance(info, dict) or not re.fullmatch(r'[A-Za-z0-9_-]{40,64}', info.get('session_token', '')):
+                raise ValueError('Invalid session metadata')
+            for key in ('created_at', 'last_active', 'cols', 'rows'):
+                if not isinstance(info.get(key), (int, float)):
+                    raise ValueError('Missing or invalid session metadata')
+            if not isinstance(info.get('cwd'), str):
+                raise ValueError('Invalid directory')
+            info.update(pid=None, clients=0)
+            terminal_sessions[path.stem] = info
+            session_tokens[path.stem] = info['session_token']
+        except (OSError, ValueError, TypeError):
+            app.logger.warning('Unable to read session metadata: %s', path.name)
+
+
+load_sessions()
+
 
 def get_session_token(session_id):
-    if session_id not in session_tokens:
-        session_tokens[session_id] = generate_token()
-    return session_tokens[session_id]
+    return session_tokens.get(session_id)
+
 
 def get_session_url(session_id):
-    token = get_session_token(session_id)
-    return f"/c/{token}"
+    return f"/c/{get_session_token(session_id)}"
+
 
 def get_session_by_token(token):
-    for sid, tok in session_tokens.items():
-        if tok == token:
-            return sid
-    return None
+    with SESSIONS_LOCK:
+        return next((sid for sid, value in session_tokens.items() if hmac.compare_digest(value.encode(), token.encode())), None)
+
+
+def session_alive(sid):
+    result = tmux_command('display-message', '-p', '-t', sid, '#{pane_dead}', check=False)
+    return result.returncode == 0 and result.stdout.strip() == '0'
+
 
 def cleanup_session(session_id):
-    if session_id in terminal_sessions:
-        info = terminal_sessions[session_id]
-        if info.get('master_fd') is not None:
-            try:
-                os.close(info['master_fd'])
-            except:
-                pass
-        if info.get('pid'):
-            try:
-                os.kill(info['pid'], signal.SIGTERM)
-            except:
-                pass
-        del terminal_sessions[session_id]
-    for tok, sid in list(session_tokens.items()):
-        if sid == session_id:
-            del session_tokens[tok]
+    with SESSIONS_LOCK:
+        if session_id not in terminal_sessions:
+            return
+        tmux_command('kill-session', '-t', session_id, check=False)
+        terminal_sessions.pop(session_id, None)
+        session_tokens.pop(session_id, None)
+        (TERMINAL_SESSIONS_DIR / f'{session_id}.json').unlink(missing_ok=True)
+        shutil.rmtree(TERMINAL_SESSIONS_DIR / session_id, ignore_errors=True)
+
+
+def same_origin():
+    origin = request.headers.get('Origin')
+    if not origin:
+        return False
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    configured = os.environ.get('PUBLIC_ORIGIN')
+    if configured:
+        return origin.rstrip('/') == configured.rstrip('/')
+    return parsed.scheme in ('http', 'https') and parsed.netloc == request.host and not parsed.path
+
+
+@app.before_request
+def protect_requests():
+    # Tailscale ACLs remain the perimeter; optional password protects all routes.
+    password = os.environ.get('WEBCONSOLE_PASSWORD')
+    if password and not session.get('authorized'):
+        auth = request.authorization
+        if not auth or not auth.password or not hmac.compare_digest(auth.password.encode(), password.encode()):
+            return Response('Authentication required', 401, {'WWW-Authenticate': 'Basic realm="WebConsole"'})
+        session['authorized'] = True
+    if request.path.startswith('/ws/'):
+        if not same_origin():
+            abort(403)
+        sid = sanitize_session_id((request.view_args or {}).get('session_id'))
+        expected = session_tokens.get(sid)
+        if not expected or not hmac.compare_digest(expected.encode(), request.args.get('token', '').encode()):
+            abort(403)
+    if request.method in ('POST', 'DELETE', 'PUT', 'PATCH'):
+        if request.headers.get('X-WebConsole') != '1':
+            abort(403)
+        if request.headers.get('Origin') and not same_origin():
+            abort(403)
+
+
+@app.after_request
+def security_headers(response):
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Content-Security-Policy'] = "frame-ancestors 'none'; object-src 'none'; base-uri 'self'"
+    if not request.path.startswith('/static/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
 
 def resolve_session_cwd(info):
-    """Best-effort cwd for completions without prompt injection."""
-    pid = info.get('pid')
-    if pid:
-        try:
-            cwd = os.readlink(f'/proc/{int(pid)}/cwd')
-            if cwd and os.path.isdir(cwd):
-                info['cwd'] = cwd
-                return cwd
-        except Exception:
-            pass
+    """Ask tmux for the active pane directory, including after server restart."""
+    sid = next((sid for sid, value in terminal_sessions.items() if value is info), None)
+    if sid:
+        result = tmux_command('display-message', '-p', '-t', sid, '#{pane_current_path}', check=False)
+        cwd = result.stdout.strip()
+        if result.returncode == 0 and os.path.isdir(cwd):
+            info['cwd'] = cwd
+            return cwd
     cwd = info.get('cwd') or str(TERMINAL_SESSIONS_DIR)
     return cwd if os.path.isdir(cwd) else str(TERMINAL_SESSIONS_DIR)
 
@@ -158,181 +264,151 @@ def path_completion_items(cwd, token='', dirs_only=False, limit=40):
     items.sort(key=lambda item: item['value'].lower())
     return items[:limit]
 
-# ANSI color codes
-ANSI_COLORS = {
-    '0': '#000000', '1': '#CC0000', '2': '#4E9A06', '3': '#C4A000',
-    '4': '#3465A4', '5': '#75517B', '6': '#06989A', '7': '#D3D7CF',
-    '8': '#555753', '9': '#EF2929', '10': '#8AE234', '11': '#FCE94F',
-    '12': '#729FCF', '13': '#AD7FA8', '14': '#34E2E2', '15': '#EEEEEC',
-}
+def encode_terminal_frame(raw):
+    if len(raw) >= 192:
+        compressed = zlib.compress(raw, level=1)
+        if len(compressed) < len(raw):
+            return b'\x01' + compressed
+    return b'\x00' + raw
+
 
 @sock.route('/ws/<session_id>')
 def terminal_ws(ws, session_id):
-    """PTY <-> WebSocket bridge optimized for low bandwidth/latency.
-
-    PTY output is sent as compressed binary frames, batched for weak links.
-    Control messages (resize/ping/input) remain small JSON frames from browser -> server.
-    """
-    session_id = sanitize_session_id(session_id)
-    if not session_id:
-        ws.close()
-        return
-
-    # Create or get session
-    if session_id not in terminal_sessions:
-        try:
-            master_fd, slave_fd = pty.openpty()
-            cols, rows = 120, 30
-            winsize = struct.pack('HHHH', rows, cols, 0, 0)
-            fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
-
-            pid = os.fork()
-            if pid == 0:
-                # Child process: real interactive shell attached to PTY.
-                os.close(master_fd)
-                os.setsid()
-                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
-                os.dup2(slave_fd, 0)
-                os.dup2(slave_fd, 1)
-                os.dup2(slave_fd, 2)
-                if slave_fd > 2:
-                    os.close(slave_fd)
-
-                env = os.environ.copy()
-                env['TERM'] = 'xterm-256color'
-                env['COLORTERM'] = 'truecolor'
-                env['LANG'] = 'en_US.UTF-8'
-                env['LC_ALL'] = env.get('LC_ALL', 'en_US.UTF-8')
-                env['PATH'] = str(Path.home() / '.local' / 'bin') + ':' + env.get('PATH', '')
-                os.execvpe('bash', ['bash', '-l'], env)
-
-            os.close(slave_fd)
-            flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-            fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-            terminal_sessions[session_id] = {
-                'created_at': time.time(),
-                'last_active': time.time(),
-                'pid': pid,
-                'master_fd': master_fd,
-                'cwd': str(TERMINAL_SESSIONS_DIR),
-                'session_token': get_session_token(session_id),
-                'cols': cols,
-                'rows': rows,
-            }
-        except Exception as e:
-            ws.send(json.dumps({'type': 'error', 'data': str(e)}))
-            ws.close()
+    """Each browser attaches its own tmux client; tmux owns the persistent shell."""
+    with SESSIONS_LOCK:
+        info = terminal_sessions.get(session_id)
+        if not info or info.get('clients', 0) >= MAX_CLIENTS:
+            ws.close(reason=1008, message='Session unavailable or client limit reached')
             return
-
-    info = terminal_sessions[session_id]
-    info['last_active'] = time.time()
-    master_fd = info['master_fd']
+        info['clients'] = info.get('clients', 0) + 1
+    master_fd = slave_fd = None
+    client = None
     stop = threading.Event()
     send_lock = threading.Lock()
 
     def safe_send(payload):
-        """Serialize sends; simple-websocket is not guaranteed send-thread-safe."""
         with send_lock:
             ws.send(payload)
 
-    def encode_terminal_frame(raw: bytes) -> bytes:
-        """Prefix terminal frames: 0x00 raw, 0x01 zlib-compressed.
-
-        Terminal/TUI streams compress extremely well. For ETECSA-class links,
-        fewer bytes matters more than shaving a few CPU cycles.
-        """
-        if not raw:
-            return b'\x00'
-        if len(raw) < 192:
-            return b'\x00' + raw
-        compressed = zlib.compress(raw, level=1)
-        if len(compressed) + 1 < len(raw):
-            return b'\x01' + compressed
-        return b'\x00' + raw
+    def write_input(raw):
+        # Nonblocking PTYs can accept only part of a paste. Never discard its tail.
+        view = memoryview(raw)
+        deadline = time.monotonic() + 5
+        while view and not stop.is_set():
+            try:
+                count = os.write(master_fd, view)
+                view = view[count:]
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise OSError('Terminal input timed out')
+                select.select([], [master_fd], [], 0.1)
 
     def pty_reader():
-        """Batch PTY bytes into binary websocket frames for smoother rendering."""
-        buf = bytearray()
-        last_flush = time.monotonic()
-        max_batch = 65536       # bigger batches = fewer packets on weak links
-        frame_interval = 0.045  # ~22fps transport; xterm still renders smoothly
         try:
             while not stop.is_set():
-                ready, _, _ = select.select([master_fd], [], [], frame_interval)
-                if master_fd in ready:
-                    while True:
-                        try:
-                            chunk = os.read(master_fd, 8192)
-                            if not chunk:
-                                stop.set()
-                                break
-                            buf.extend(chunk)
-                            info['last_active'] = time.time()
-                            if len(buf) >= max_batch:
-                                safe_send(encode_terminal_frame(bytes(buf)))
-                                buf.clear()
-                                last_flush = time.monotonic()
-                        except BlockingIOError:
-                            break
-                        except OSError:
+                ready, _, _ = select.select([master_fd], [], [], 0.045)
+                if not ready:
+                    continue
+                buf = bytearray()
+                batch_deadline = time.monotonic() + 0.025
+                while len(buf) < 65536:
+                    try:
+                        chunk = os.read(master_fd, min(8192, 65536 - len(buf)))
+                        if not chunk:
                             stop.set()
                             break
-
-                now = time.monotonic()
-                if buf and (now - last_flush >= frame_interval or len(buf) >= max_batch):
+                        buf.extend(chunk)
+                    except BlockingIOError:
+                        remaining = batch_deadline - time.monotonic()
+                        if remaining <= 0 or not select.select([master_fd], [], [], remaining)[0]:
+                            break
+                    except OSError:
+                        stop.set()
+                        break
+                if buf:
                     safe_send(encode_terminal_frame(bytes(buf)))
-                    buf.clear()
-                    last_flush = now
+        except Exception:
+            app.logger.debug('Terminal client disconnected', exc_info=True)
         finally:
-            if buf:
-                try:
-                    safe_send(encode_terminal_frame(bytes(buf)))
-                except Exception:
-                    pass
             stop.set()
 
-    reader = threading.Thread(target=pty_reader, daemon=True)
-    reader.start()
-
+    reader = None
     try:
+        # Ended sessions are never silently replaced by another shell.
+        if not session_alive(session_id):
+            safe_send(json.dumps({'type': 'ended'}))
+            return
+        master_fd, slave_fd = pty.openpty()
+        cols = max(20, min(int(request.args.get('cols', info.get('cols', 120))), 500))
+        rows = max(5, min(int(request.args.get('rows', info.get('rows', 30))), 200))
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+        env = os.environ.copy()
+        env.update(TERM='xterm-256color', COLORTERM='truecolor')
+        env.pop('TMUX', None)
+        client = subprocess.Popen(
+            [os.sys.executable, str(Path(__file__).with_name('pty_exec.py')), TMUX_BIN, TMUX_SOCKET, session_id],
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, start_new_session=True,
+            close_fds=True, env=env)
+        os.close(slave_fd)
+        slave_fd = None
+        os.set_blocking(master_fd, False)
+        safe_send(json.dumps({'type': 'ready'}))
+        reader = threading.Thread(target=pty_reader, daemon=True)
+        reader.start()
         while not stop.is_set():
-            msg = ws.receive()
+            msg = ws.receive(timeout=1)
             if msg is None:
-                break
-            try:
-                if isinstance(msg, bytes):
-                    os.write(master_fd, msg)
-                    info['last_active'] = time.time()
-                    continue
-
-                data = json.loads(msg)
-                msg_type = data.get('type')
-                if msg_type == 'input':
-                    os.write(master_fd, data.get('data', '').encode('utf-8'))
-                    info['last_active'] = time.time()
-                elif msg_type == 'resize':
-                    cols = int(data.get('cols') or 120)
-                    rows = int(data.get('rows') or 30)
-                    cols = max(20, min(cols, 500))
-                    rows = max(5, min(rows, 200))
-                    winsize = struct.pack('HHHH', rows, cols, 0, 0)
-                    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
-                    info['cols'] = cols
-                    info['rows'] = rows
-                    info['last_active'] = time.time()
-                elif msg_type == 'ping':
-                    safe_send(json.dumps({'type': 'pong'}))
-            except json.JSONDecodeError:
-                if isinstance(msg, str):
-                    os.write(master_fd, msg.encode('utf-8'))
-                    info['last_active'] = time.time()
-            except (BrokenPipeError, OSError):
-                break
+                continue
+            if isinstance(msg, bytes):
+                if b'\r' in msg or b'\x03' in msg:
+                    with telemetry.lock:
+                        telemetry.ensure(session_id, info)['event_state'] = None
+                write_input(msg)
+                info['last_active'] = time.time()
+                continue
+            data = json.loads(msg)
+            if not isinstance(data, dict):
+                raise ValueError('Invalid control message')
+            if data.get('type') == 'input':
+                if not isinstance(data.get('data'), str):
+                    raise ValueError('Invalid input')
+                write_input(data['data'].encode('utf-8'))
+                info['last_active'] = time.time()
+            elif data.get('type') == 'resize':
+                cols = max(20, min(int(data.get('cols', 120)), 500))
+                rows = max(5, min(int(data.get('rows', 30)), 200))
+                fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+                info.update(cols=cols, rows=rows)
+            elif data.get('type') == 'ping':
+                safe_send(json.dumps({'type': 'pong'}))
+    except (ValueError, TypeError, OSError, subprocess.SubprocessError):
+        app.logger.exception('Terminal attach failed')
+        try:
+            safe_send(json.dumps({'type': 'error', 'data': 'Unable to attach to terminal. Check server logs.'}))
+        except Exception:
+            pass
     finally:
         stop.set()
-        # Keep the PTY and token so a refreshed browser can reconnect to this shell.
-        if terminal_sessions.get(session_id) is info:
+        if reader:
+            reader.join(timeout=1)
+        if master_fd is not None:
+            os.close(master_fd)
+        if slave_fd is not None:
+            os.close(slave_fd)
+        if client:
+            # Terminate ONLY the disposable tmux client, never the session shell.
+            if client.poll() is None:
+                client.terminate()
+            try:
+                client.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                client.wait()
+        with SESSIONS_LOCK:
+            info['clients'] = max(0, info.get('clients', 1) - 1)
             info['last_active'] = time.time()
+            if terminal_sessions.get(session_id) is info:
+                persist_session(session_id, info)
 
 # Routes
 @app.route('/')
@@ -349,53 +425,111 @@ def console(token):
                              token=token,
                              cols=info.get('cols', 120),
                              rows=info.get('rows', 30))
-    # Auto-create session
-    session_id = uuid.uuid4().hex[:12]
-    token = get_session_token(session_id)
-    return render_template('console.html',
-                         session_id=session_id,
-                         token=token,
-                         cols=120,
-                         rows=30)
+    abort(404, description='Session not found. Create a new session from the dashboard.')
+
+def session_snapshot():
+    with SESSIONS_LOCK:
+        return list(terminal_sessions.items())
+
+
+def save_telemetry(sid, info):
+    with SESSIONS_LOCK:
+        if terminal_sessions.get(sid) is info:
+            persist_session(sid, info)
+
+
+telemetry = Telemetry(tmux_command, session_snapshot, lambda: TERMINAL_SESSIONS_DIR, save_telemetry)
+# Resolve tmux dynamically so isolated tests and state-directory overrides are honored.
+telemetry.tmux = lambda *args, **kwargs: tmux_command(*args, **kwargs)
+
 
 @app.route('/api/sessions')
 def api_sessions():
+    telemetry.sample()
     sessions_list = []
-    for sid, info in terminal_sessions.items():
-        # Check if process is alive
-        is_active = False
-        if info.get('pid'):
-            try:
-                os.kill(info['pid'], 0)
-                is_active = True
-            except:
-                is_active = False
-
+    for sid, info in session_snapshot():
         sessions_list.append({
-            'id': sid,
-            'token': info.get('session_token', ''),
-            'url': get_session_url(sid),
+            'id': sid, 'token': info.get('session_token', ''), 'url': get_session_url(sid),
+            'title': info.get('title', ''),
             'created_at': datetime.fromtimestamp(info['created_at']).isoformat(),
             'last_active': datetime.fromtimestamp(info['last_active']).isoformat(),
-            'cwd': info.get('cwd', ''),
-            'pid': info.get('pid'),
-            'is_active': is_active
+            'cwd': info.get('cwd', ''), 'pid': info.get('pid'),
+            **telemetry.payload(sid, info),
         })
-    return jsonify({'sessions': sessions_list})
+    return jsonify({'sessions': sessions_list, 'monitor_available': telemetry.available,
+                    'observed_at': telemetry.last_sample})
+
+
+@app.route('/api/sessions/<session_id>/acknowledge', methods=['POST'])
+def api_acknowledge(session_id):
+    info = terminal_sessions.get(sanitize_session_id(session_id))
+    if info is None:
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict) or not isinstance(payload.get('fingerprint'), str):
+        abort(400)
+    if not telemetry.acknowledge(session_id, info, payload['fingerprint']):
+        return jsonify({'error': 'Notification changed; refresh before acknowledging.'}), 409
+    return jsonify({'success': True})
+
+
+def agent_available(name):
+    if shutil.which(name):
+        return True
+    # User services often lack the NVM/venv PATH configured by the login shell.
+    env = os.environ.copy()
+    env.pop('WEBCONSOLE_PASSWORD', None)
+    env.pop('SECRET_KEY', None)
+    try:
+        result = subprocess.run(['bash', '-lc', 'type -P -- "$1"', 'webconsole', name],
+                                env=env, capture_output=True, text=True, timeout=5)
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
 
 @app.route('/api/sessions', methods=['POST'])
 def api_create_session():
-    session_id = uuid.uuid4().hex[:12]
-    token = get_session_token(session_id)
-    return jsonify({
-        'id': session_id,
-        'token': token,
-        'url': get_session_url(session_id)
-    })
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        abort(400)
+    launcher = payload.get('agent', 'terminal')
+    if not isinstance(launcher, str) or launcher not in {'terminal', 'codex', 'opencode', 'hermes'}:
+        abort(400)
+    title = payload.get('title', '')
+    cwd = payload.get('cwd') or str(Path.home())
+    if not isinstance(title, str) or len(title) > 100 or not isinstance(cwd, str) or not os.path.isdir(cwd):
+        abort(400)
+    if launcher != 'terminal' and not agent_available(launcher):
+        return jsonify({'error': f'{launcher} no está instalado o no está en PATH.'}), 400
+    with SESSIONS_LOCK:
+        if len(terminal_sessions) >= MAX_SESSIONS:
+            return jsonify({'error': 'Session limit reached; delete unused sessions.'}), 429
+        sid = uuid.uuid4().hex[:12]
+        token = generate_token()
+        now = time.time()
+        info = dict(created_at=now, last_active=now, session_token=token,
+                    cols=120, rows=30, cwd=os.path.abspath(cwd), pid=None, clients=0, title=title.strip(), launcher=launcher)
+        try:
+            persist_session(sid, info)
+            command = shlex.join([sys.executable, str(Path(__file__).with_name('session_shell.py')), str(TERMINAL_SESSIONS_DIR), sid])
+            tmux_command('new-session', '-d', '-s', sid, '-x', '120', '-y', '30',
+                         '-c', info['cwd'], command)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            app.logger.exception('Session creation failed: %s', getattr(error, 'stderr', str(error)))
+            if TMUX_BIN:
+                tmux_command('kill-session', '-t', sid, check=False)
+            (TERMINAL_SESSIONS_DIR / f'{sid}.json').unlink(missing_ok=True)
+            return jsonify({'error': 'Unable to create session. Check tmux installation and server logs.'}), 503
+        terminal_sessions[sid] = info
+        session_tokens[sid] = token
+    return jsonify({'id': sid, 'token': token, 'url': get_session_url(sid)}), 201
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def api_delete_session(session_id):
     session_id = sanitize_session_id(session_id)
+    if not session_id or session_id not in terminal_sessions:
+        abort(404)
     cleanup_session(session_id)
     return jsonify({'success': True})
 
@@ -413,6 +547,8 @@ def api_complete_session(session_id):
         return jsonify({'error': 'session not found'}), 404
 
     payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict) or not isinstance(payload.get('line', ''), str) or len(payload.get('line', '')) > 8192:
+        abort(400)
     context = split_command_context(payload.get('line', ''), payload.get('cursor'))
     command = context['command']
     path_commands = {'cd': True, 'ls': False, 'cat': False, 'less': False, 'tail': False, 'head': False, 'vim': False, 'nano': False, 'code': False, 'open': False}
@@ -461,22 +597,13 @@ def health():
 # Static
 @app.route('/static/<path:filename>')
 def static_files(filename):
-    return send_from_directory('static', filename)
-
-# Cleanup inactive sessions
-def cleanup_loop():
-    while True:
-        time.sleep(60)
-        now = time.time()
-        for sid in list(terminal_sessions.keys()):
-            if now - terminal_sessions[sid]['last_active'] > 1800:  # 30 min
-                cleanup_session(sid)
+    return send_from_directory(app.static_folder, filename)
 
 if __name__ == '__main__':
-    cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
-    cleanup_thread.start()
-
-    # Bind locally; Tailscale Serve is the only intended network entry point.
+    if not TMUX_BIN:
+        raise SystemExit('tmux is required. Install it with your system package manager.')
+    threading.Thread(target=telemetry.run, daemon=True, name='session-monitor').start()
+    # Sessions have no inactivity timeout: explicit deletion is the only cleanup.
     app.run(host=os.environ.get('HOST', '127.0.0.1'),
             port=int(os.environ.get('PORT', '3030')),
             debug=False, threaded=True)

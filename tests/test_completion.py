@@ -26,7 +26,7 @@ def test_completion_endpoint_lists_directories_for_cd_and_ignores_files(tmp_path
     }
 
     client = server.app.test_client()
-    res = client.post(f"/api/sessions/{sid}/complete", json={"line": "cd a", "cursor": 4})
+    res = client.post(f"/api/sessions/{sid}/complete", headers={"X-WebConsole": "1"}, json={"line": "cd a", "cursor": 4})
 
     assert res.status_code == 200
     data = res.get_json()
@@ -35,7 +35,7 @@ def test_completion_endpoint_lists_directories_for_cd_and_ignores_files(tmp_path
     assert [item["value"] for item in data["items"]] == ["apps/"]
     assert all(item["type"] == "dir" for item in data["items"])
 
-    bare = client.post(f"/api/sessions/{sid}/complete", json={"line": "cd", "cursor": 2}).get_json()
+    bare = client.post(f"/api/sessions/{sid}/complete", headers={"X-WebConsole": "1"}, json={"line": "cd", "cursor": 2}).get_json()
     assert bare["items"] == [{"label": "apps/", "type": "dir", "value": "apps/"}]
     assert bare["token_start"] == 3
 
@@ -47,7 +47,7 @@ def test_completion_endpoint_lists_files_and_dirs_for_ls(tmp_path):
     server.terminal_sessions[sid] = {"created_at": 0, "last_active": 0, "pid": None, "master_fd": None, "cwd": str(tmp_path)}
 
     client = server.app.test_client()
-    res = client.post(f"/api/sessions/{sid}/complete", json={"line": "ls s", "cursor": 4})
+    res = client.post(f"/api/sessions/{sid}/complete", headers={"X-WebConsole": "1"}, json={"line": "ls s", "cursor": 4})
 
     assert res.status_code == 200
     values = [item["value"] for item in res.get_json()["items"]]
@@ -56,7 +56,7 @@ def test_completion_endpoint_lists_files_and_dirs_for_ls(tmp_path):
 
 def test_completion_endpoint_rejects_unknown_session():
     client = server.app.test_client()
-    res = client.post("/api/sessions/nope/complete", json={"line": "cd ", "cursor": 3})
+    res = client.post("/api/sessions/nope/complete", headers={"X-WebConsole": "1"}, json={"line": "cd ", "cursor": 3})
 
     assert res.status_code == 404
 

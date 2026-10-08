@@ -1,94 +1,56 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebConsole</title>
-    <link href="https://fonts.googleapis.com/css2?family/Google+Sans:wght@400;500;600&family=Google+Sans+Text:wght@400;500&display=swap" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/styles.css">
+    <meta name="color-scheme" content="light dark">
+    <title>Sesiones · WebConsole</title>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css?v=agent-workspace">
 </head>
 <body>
     <div class="app-container">
-        <!-- Header -->
         <header class="app-header">
-            <div class="header-left">
-                <span class="material-symbols-outlined logo">terminal</span>
-                <h1>WebConsole</h1>
-            </div>
-            <div class="header-right">
-                <button class="btn btn-primary" onclick="createSession()">
-                    <span class="material-symbols-outlined">add</span>
-                    New Session
-                </button>
-            </div>
+            <a class="brand" href="/" aria-label="WebConsole, inicio"><span class="brand-icon material-symbols-outlined" aria-hidden="true">terminal</span><span>WebConsole</span></a>
+            <span class="header-location">Espacio de agentes</span>
+            <button class="btn btn-primary" id="new-session"><span class="material-symbols-outlined" aria-hidden="true">add</span><span>Nueva sesión</span></button>
         </header>
-
-        <!-- Main Content -->
         <main class="main-content">
-            <!-- Stats Cards -->
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <span class="material-symbols-outlined stat-icon">computer</span>
-                    <div class="stat-info">
-                        <span class="stat-value" id="total-sessions">0</span>
-                        <span class="stat-label">Total Sessions</span>
+            <section class="workspace-intro" aria-labelledby="workspace-title">
+                <div><h1 id="workspace-title">Tus agentes, en marcha.</h1><p>Un lugar para seguir su trabajo y atender lo que necesita de ti.</p></div>
+                <div class="monitor-status" title="La actividad se actualiza cada pocos segundos"><span class="monitor-dot"></span><span id="monitor-label">Conectando</span><button class="icon-button" id="refresh" aria-label="Actualizar sesiones"><span class="material-symbols-outlined" aria-hidden="true">refresh</span></button></div>
+            </section>
+            <section class="attention-strip" id="attention-strip" hidden aria-label="Notificaciones pendientes"><span class="material-symbols-outlined" aria-hidden="true">notifications_active</span><div><strong id="attention-title"></strong><span>Revisa los avisos sin interrumpir a los demás agentes.</span></div><button class="btn btn-tonal" id="view-attention">Ver pendientes</button></section>
+            <section class="sessions-section" aria-label="Sesiones">
+                <div class="workspace-toolbar">
+                    <div class="filter-group" role="group" aria-label="Filtrar sesiones">
+                        <button class="filter-chip selected" data-filter="all" aria-pressed="true">Todas <span id="total-sessions">0</span></button>
+                        <button class="filter-chip" data-filter="working" aria-pressed="false">Trabajando <span id="working-sessions">0</span></button>
+                        <button class="filter-chip" data-filter="attention" aria-pressed="false">Pendientes <span id="attention-sessions">0</span></button>
+                        <button class="filter-chip" data-filter="idle" aria-pressed="false">En espera <span id="idle-sessions">0</span></button>
                     </div>
+                    <label class="search-field"><span class="material-symbols-outlined" aria-hidden="true">search</span><input id="session-search" type="search" placeholder="Buscar agente, proyecto o ID" aria-label="Buscar agente, proyecto o ID"></label>
                 </div>
-                <div class="stat-card">
-                    <span class="material-symbols-outlined stat-icon active">circle</span>
-                    <div class="stat-info">
-                        <span class="stat-value" id="active-sessions">0</span>
-                        <span class="stat-label">Active</span>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <span class="material-symbols-outlined stat-icon">schedule</span>
-                    <div class="stat-info">
-                        <span class="stat-value" id="uptime">--</span>
-                        <span class="stat-label">Server Uptime</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Sessions Table -->
-            <div class="sessions-section">
-                <div class="section-header">
-                    <h2>Sessions</h2>
-                    <button class="btn btn-icon" onclick="refreshSessions()" title="Refresh">
-                        <span class="material-symbols-outlined">refresh</span>
-                    </button>
-                </div>
-
-                <div class="sessions-list" id="sessions-list">
-                    <div class="empty-state">
-                        <span class="material-symbols-outlined">terminal</span>
-                        <p>No sessions yet</p>
-                        <span class="hint">Create a new session to get started</span>
-                    </div>
-                </div>
-            </div>
+                <div class="list-caption"><span id="list-summary">Cargando sesiones…</span><label>Ordenar por <select id="session-sort" aria-label="Ordenar sesiones"><option value="attention">Pendientes primero</option><option value="recent">Más recientes</option><option value="agent">Agente</option></select></label></div>
+                <div id="load-error" class="load-error" role="status" hidden></div>
+                <div class="sessions-list" id="sessions-list" aria-busy="true"><div class="empty-state"><span class="material-symbols-outlined" aria-hidden="true">progress_activity</span><h2>Buscando tus sesiones</h2><p>Recuperando el estado y la actividad de los agentes.</p></div></div>
+            </section>
         </main>
-
-        <!-- Footer -->
-        <footer class="app-footer">
-            <span>WebConsole • Tailscale-only access</span>
-        </footer>
+        <footer class="app-footer"><span><span class="material-symbols-outlined" aria-hidden="true">shield</span>Tu espacio privado de trabajo</span><span>Servidor activo desde hace <span id="uptime">—</span></span></footer>
     </div>
-
-    <!-- Toast Notifications -->
-    <div class="toast-container" id="toast-container"></div>
-
-    <script src="/static/js/app.js?v=server-uptime"></script>
-    <script>
-        // Initialize
-        document.addEventListener('DOMContentLoaded', () => {
-            refreshSessions();
-            setInterval(refreshSessions, 15000);
-            refreshUptime();
-            setInterval(refreshUptime, 15000);
-            updateUptime();
-        });
-    </script>
+    <dialog id="create-dialog" aria-labelledby="dialog-title">
+        <form id="create-form">
+            <div class="dialog-heading"><span class="material-symbols-outlined" aria-hidden="true">terminal</span><button type="button" class="icon-button" id="close-dialog" aria-label="Cerrar"><span class="material-symbols-outlined" aria-hidden="true">close</span></button></div>
+            <h2 id="dialog-title">Un nuevo espacio de trabajo</h2><p class="dialog-description">Inicia un agente o abre una consola para cualquier herramienta.</p>
+            <label class="form-field">Agente<select name="agent"><option value="terminal">Consola · detección automática</option><option value="codex">Codex</option><option value="opencode">OpenCode</option><option value="hermes">Hermes</option></select></label>
+            <label class="form-field">Nombre de la tarea <span class="optional">opcional</span><input name="title" maxlength="100" placeholder="Por ejemplo, revisar la API"></label>
+            <label class="form-field">Directorio de trabajo <span class="optional">opcional</span><input name="cwd" placeholder="Por defecto, tu carpeta personal" autocomplete="off"></label>
+            <p id="create-error" class="form-error" role="alert" hidden></p>
+            <div class="dialog-actions"><button type="button" class="btn btn-text" id="cancel-create">Cancelar</button><button type="submit" class="btn btn-primary" id="submit-create">Crear sesión</button></div>
+        </form>
+    </dialog>
+    <div class="toast-container" id="toast-container" role="status" aria-live="polite"></div>
+    <script src="/static/js/app.js?v=agent-workspace" defer></script>
 </body>
 </html>

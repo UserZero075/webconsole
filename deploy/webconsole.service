@@ -8,9 +8,12 @@ WorkingDirectory=%h/Projects/webconsole
 Environment=PYTHONUNBUFFERED=1
 Environment=HOST=127.0.0.1
 Environment=PORT=3030
+EnvironmentFile=-%h/Projects/webconsole/.env
 ExecStart=%h/Projects/webconsole/.venv/bin/python %h/Projects/webconsole/app/server.py
 Restart=on-failure
 RestartSec=3
+# Keep the tmux server and its tools alive when the HTTP server restarts.
+KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=10
 UMask=0077
@@ -18,7 +21,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
 RestrictSUIDSGID=yes
-TasksMax=128
+TasksMax=512
 
 [Install]
 WantedBy=default.target

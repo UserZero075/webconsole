@@ -1,19 +1,29 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es"{% if embedded %} class="embedded-terminal-document"{% endif %}>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Terminal - WebConsole</title>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/js/lib/xterm.css">
-    <link rel="stylesheet" href="/static/css/console.css">
+    <style>
+        html, body { background:#0d1117; color:#e6edf3; }
+        html.embedded-terminal-document, html.embedded-terminal-document body { width:100%; height:100%; min-height:0; overflow:hidden; background:#1a1a2e; }
+        html.embedded-terminal-document .terminal-app { display:flex; width:100%; height:100%; min-height:0; flex-direction:column; background:#1a1a2e; }
+        html.embedded-terminal-document .terminal-header,
+        html.embedded-terminal-document #local-input-composer,
+        html.embedded-terminal-document .status-bar,
+        html.embedded-terminal-document .toast-container { display:none !important; }
+        html.embedded-terminal-document .terminal-wrapper { min-width:0; min-height:0; flex:1; overflow:hidden; padding:0; background:#1a1a2e; }
+        html.embedded-terminal-document #terminal { width:100%; height:100%; }
+    </style>
+    <link rel="stylesheet" href="/static/js/lib/xterm.css?v={{ asset_version('js/lib/xterm.css') }}">
+    <link rel="stylesheet" href="/static/css/console.css?v={{ asset_version('css/console.css') }}">
 </head>
-<body class="terminal-mode">
+<body class="terminal-mode{% if embedded %} embedded-terminal{% endif %}">
     <div class="terminal-app">
         <!-- Top Bar -->
-        <header class="terminal-header">
+        <header class="terminal-header"{% if embedded %} hidden{% endif %}>
             <div class="header-left">
-                <a href="/" class="back-btn" title="Dashboard">
+                <a href="/" class="back-btn" title="Dashboard" aria-label="Volver al workspace">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M19 12H5M12 19l-7-7 7-7"/>
                     </svg>
@@ -25,26 +35,33 @@
                 </span>
             </div>
             <div class="header-actions">
-                <button class="action-btn active" id="local-input-btn" onclick="toggleLocalInput()" title="Local input buffering: type locally, send on Enter (Ctrl+B)">
+                <button class="action-btn active" id="local-input-btn" onclick="toggleLocalInput()" title="Local input buffering: type locally, send on Enter (Ctrl+B)" aria-label="Cambiar entre entrada local y directa" aria-pressed="true">
                     <span class="kbd-icon">LI</span>
                 </button>
-                <button class="action-btn" onclick="copyLink()" title="Copy Link">
+                <button class="action-btn" id="interrupt-terminal" onclick="interruptTerminal()" title="Enviar Ctrl+C a esta terminal" aria-label="Interrumpir la terminal">
+                    <span class="kbd-icon">^C</span>
+                </button>
+                <button class="action-btn" id="attach-terminal" title="Adjuntar archivo multimedia" aria-label="Adjuntar archivo multimedia">
+                    <span class="kbd-icon">＋</span>
+                </button>
+                <input id="attachment-picker" type="file" accept="image/*,audio/*,video/*,application/pdf" multiple hidden>
+                <button class="action-btn" onclick="copyLink()" title="Copy Link" aria-label="Copiar enlace de la sesión">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
                         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
                     </svg>
                 </button>
-                <button class="action-btn" onclick="toggleFullscreen()" title="Fullscreen">
+                <button class="action-btn" onclick="toggleFullscreen()" title="Fullscreen" aria-label="Alternar pantalla completa">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
                     </svg>
                 </button>
-                <button class="action-btn" onclick="clearTerminal()" title="Clear">
+                <button class="action-btn" onclick="clearTerminal()" title="Clear" aria-label="Limpiar la vista de terminal">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                     </svg>
                 </button>
-                <button class="action-btn danger" onclick="killSession()" title="Kill Session">
+                <button class="action-btn danger" onclick="killSession()" title="Kill Session" aria-label="Terminar sesión">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"/>
                         <line x1="6" y1="6" x2="18" y2="18"/>
@@ -56,7 +73,24 @@
         <!-- Terminal Container -->
         <div class="terminal-wrapper" id="terminal-wrapper">
             <div id="terminal"></div>
+            <div class="terminal-scroll-hint" id="terminal-scroll-hint" role="status" aria-live="polite" hidden></div>
+            <div class="terminal-scroll-controls" id="terminal-scroll-controls" hidden>
+                <button type="button" id="terminal-scroll-to-end" aria-label="Volver al final de la salida local">Volver al final</button>
+            </div>
         </div>
+
+        <section class="attachment-transfer-panel" id="attachment-transfer-panel" hidden
+                 role="region" aria-label="Progreso de archivos adjuntos">
+            <div class="attachment-transfer-header">
+                <div class="attachment-transfer-heading">
+                    <strong>Adjuntos</strong>
+                    <span id="attachment-transfer-summary" role="status" aria-live="polite"></span>
+                </div>
+                <button class="attachment-transfer-close" id="attachment-transfer-close" type="button"
+                        aria-label="Ocultar progreso de adjuntos" title="Ocultar">×</button>
+            </div>
+            <div class="attachment-transfer-list" id="attachment-transfer-list"></div>
+        </section>
 
         <!-- Dark command/path previews, Warp-style, above the active command. -->
         <div class="suggestion-panel hidden" id="suggestion-panel"></div>
@@ -70,7 +104,7 @@
         </div>
 
         <!-- Status Bar -->
-        <div class="status-bar">
+        <div class="status-bar"{% if embedded %} hidden{% endif %}>
             <span class="status-item" id="status-connection">
                 <span class="indicator"></span>
                 <span class="label">Connection</span>
@@ -101,13 +135,18 @@
     <!-- Toast -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/static/js/lib/xterm-531.js"></script>
-    <script src="/static/js/lib/xterm-addon-fit-081.js"></script>
-    <script src="/static/js/lib/xterm-addon-web-links-090.js"></script>
-    <script src="/static/js/lib/pako-210.min.js"></script>
+    <script src="/static/js/lib/xterm-531.js?v={{ asset_version('js/lib/xterm-531.js') }}"></script>
+    <script src="/static/js/lib/xterm-addon-fit-081.js?v={{ asset_version('js/lib/xterm-addon-fit-081.js') }}"></script>
+    <script src="/static/js/lib/xterm-addon-web-links-090.js?v={{ asset_version('js/lib/xterm-addon-web-links-090.js') }}"></script>
+    <script src="/static/js/lib/pako-210.min.js?v={{ asset_version('js/lib/pako-210.min.js') }}"></script>
+    <script src="/static/js/mobile-viewport.js?v={{ asset_version('js/mobile-viewport.js') }}"></script>
+    <script src="/static/js/terminal-touch.js?v={{ asset_version('js/terminal-touch.js') }}"></script>
+    <script src="/static/js/terminal-shortcuts.js?v={{ asset_version('js/terminal-shortcuts.js') }}"></script>
     <script>
         const sessionId = {{ session_id | tojson }};
         const token = {{ token | tojson }};
+        const sessionRole = {{ session_role | tojson }};
+        const embedded = {{ embedded | tojson }};
 
         let ws = null;
         let reconnectAttempts = 0;
@@ -116,14 +155,28 @@
         let lastResponseAt = 0;
         let sessionEnded = false;
         let terminalReady = false;
+        let terminalHasRendered = false;
         let transportReady = false;
+        let lastSentDimensions = null;
         let lastPingTime = 0;
+        let attachmentInputAllowed = !embedded && sessionRole !== 'workspace_shell';
+        const TERMINAL_FLOW_VERSION = 1;
+        const TERMINAL_RENDER_LAG_MS = 4000;
+        const TERMINAL_RENDER_QUEUE_LIMIT = 128 * 1024;
+        const TERMINAL_RESYNC_COOLDOWN_MS = 8000;
+        const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+        const MAX_VISIBLE_ATTACHMENT_TRANSFERS = 10;
+        let lastResyncAt = 0;
+        const attachmentTransfers = [];
+        let nextAttachmentTransferId = 1;
+        let attachmentUploadActive = false;
+        let attachmentTransferDismissed = false;
 
         // Initialize xterm
         const terminal = new Terminal({
             cursorBlink: true,
             cursorStyle: 'block',
-            fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
+            fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace',
             fontSize: 14,
             lineHeight: 1.2,
             letterSpacing: 0,
@@ -160,45 +213,117 @@
         const fitAddon = new FitAddon.FitAddon();
         terminal.loadAddon(fitAddon);
 
+        function syncTerminalScrollbarWidth() {
+            const viewport = terminal.element?.querySelector('.xterm-viewport');
+            const coreViewport = terminal._core?.viewport;
+            if (!viewport || !coreViewport) return;
+            // xterm falls back to 15px when the browser uses overlay/hidden scrollbars.
+            // Fit against the actual gutter so those columns remain available.
+            coreViewport.scrollBarWidth = Math.max(0, viewport.offsetWidth - viewport.clientWidth);
+        }
+
+        function terminalContainerVisible() {
+            const wrapper = document.getElementById('terminal-wrapper');
+            if (!wrapper || document.hidden) return false;
+            const rect = wrapper.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        }
+
+        function fitTerminal() {
+            if (!terminalContainerVisible()) return false;
+            syncTerminalScrollbarWidth();
+            const dimensions = fitAddon.proposeDimensions();
+            if (!dimensions || dimensions.cols < 20 || dimensions.rows < 5) return false;
+            fitAddon.fit();
+            return true;
+        }
+
+        function proposeTerminalDimensions() {
+            if (!terminalContainerVisible()) return null;
+            syncTerminalScrollbarWidth();
+            const dimensions = fitAddon.proposeDimensions();
+            if (!dimensions || dimensions.cols < 20 || dimensions.rows < 5) return null;
+            return dimensions;
+        }
+
         // Web links addon
         terminal.loadAddon(new WebLinksAddon.WebLinksAddon());
 
         // Open terminal
         terminal.open(document.getElementById('terminal'));
-        fitAddon.fit();
+
+        const scrollHint = document.getElementById('terminal-scroll-hint');
+        const scrollControls = document.getElementById('terminal-scroll-controls');
+        const touchScroll = window.WebConsoleTerminalTouch.bind(terminal, state => {
+            updateTerminalScrollState(state === 'unsupported');
+        });
+
+        function updateTerminalScrollState(showUnsupported = false) {
+            const buffer = terminal.buffer.active;
+            const normal = buffer.type === 'normal';
+            scrollControls.hidden = !(normal && buffer.viewportY < buffer.baseY);
+
+            const coarsePointer = window.matchMedia?.('(pointer: coarse)').matches
+                || (navigator.maxTouchPoints || 0) > 0;
+            const mouseMode = terminal.modes.mouseTrackingMode;
+            const unsupported = showUnsupported || !['vt200', 'drag', 'any'].includes(mouseMode);
+            const shouldExplain = coarsePointer && (!normal || mouseMode !== 'none' || showUnsupported);
+            scrollHint.hidden = !shouldExplain;
+            if (shouldExplain) {
+                scrollHint.textContent = unsupported
+                    ? 'Esta pantalla no ofrece rueda verificable. Usa los controles propios de la TUI; WebConsole no enviará teclas.'
+                    : 'La TUI controla la rueda. El historial depende de su soporte; no es scrollback local.';
+            }
+        }
+
+        document.getElementById('terminal-scroll-to-end').addEventListener('click', () => {
+            if (terminal.buffer.active.type === 'normal') terminal.scrollToBottom();
+        });
+        terminal.onScroll(() => updateTerminalScrollState());
+        terminal.buffer.onBufferChange(() => updateTerminalScrollState());
+        terminal.onWriteParsed?.(() => updateTerminalScrollState());
+        updateTerminalScrollState();
 
         // Handle resize (debounced; avoids flooding slow links)
         let resizeTimer = null;
         function sendResize() {
-            const dims = fitAddon.proposeDimensions();
-            if (!dims || document.hidden || dims.cols < 20 || dims.rows < 5) return;
+            const dims = proposeTerminalDimensions();
+            if (!dims) return null;
             document.getElementById('status-cols').textContent = dims.cols;
             document.getElementById('status-rows').textContent = dims.rows;
             if (ws && ws.readyState === WebSocket.OPEN) {
+                if (lastSentDimensions?.cols === dims.cols && lastSentDimensions?.rows === dims.rows) return;
                 ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+                lastSentDimensions = {cols:dims.cols, rows:dims.rows};
             }
+            return dims;
         }
         function scheduleResize() {
             clearTimeout(resizeTimer);
             resizeTimer = setTimeout(() => {
                 if (document.hidden) return;
-                fitAddon.fit();
-                sendResize();
-            }, 80);
+                if (!fitTerminal()) return;
+                const dims = sendResize();
+                if (dims && !ws && !sessionEnded) connect();
+            }, 100);
         }
 
-        // Initial fit
-        setTimeout(scheduleResize, 100);
+        // Wait until parsing and stylesheet loading finish before measuring xterm.
+        document.addEventListener('DOMContentLoaded', scheduleResize, {once:true});
 
         // Resize on window change
         window.addEventListener('resize', scheduleResize);
+        window.addEventListener('webconsole:viewportchange', scheduleResize);
+        const terminalResizeObserver = new ResizeObserver(scheduleResize);
+        terminalResizeObserver.observe(document.getElementById('terminal-wrapper'));
+        if (document.fonts?.ready) document.fonts.ready.then(scheduleResize);
 
         // Send user keystrokes as compact binary frames where possible.
         // Local input mode keeps normal text editing 100% local and only sends
         // the completed line on Enter. This removes keystroke-by-keystroke lag
         // on bad links while still allowing raw control keys to pass through.
         const encoder = new TextEncoder();
-        let localInputMode = localStorage.getItem('webconsole.localInputMode') === 'on';
+        let localInputMode = !embedded && localStorage.getItem('webconsole.localInputMode') === 'on';
         let localBuffer = '';
         let localCursor = 0;
         let liveBuffer = '';
@@ -230,6 +355,386 @@
                 }
             }
         }
+
+        function sendParentMessage(data) {
+            if (embedded && window.parent !== window) window.parent.postMessage(data, window.location.origin);
+        }
+
+        function reportTerminalState(state) {
+            sendParentMessage({type:'webconsole:terminal-status', session_id:sessionId, state});
+        }
+
+        function mediaFilesFromClipboard(event) {
+            const files = [...(event.clipboardData?.files || [])];
+            if (files.length) return files;
+            const found = [];
+            for (const item of [...(event.clipboardData?.items || [])]) {
+                if (item.kind !== 'file') continue;
+                const file = item.getAsFile();
+                if (file) found.push(file);
+            }
+            return found;
+        }
+
+        function isSupportedAttachment(file) {
+            const type = (file.type || '').toLowerCase();
+            return type.startsWith('image/') || type.startsWith('audio/') || type.startsWith('video/')
+                || type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+        }
+
+        function attachmentReference(path) {
+            if (typeof path !== 'string' || !path.startsWith('/tmp/') || /[\x00-\x1f\x7f]/.test(path)) return false;
+            if (!transportReady || !ws || ws.readyState !== WebSocket.OPEN) return false;
+            terminal.paste(`Archivo adjunto: ${path}`);
+            return true;
+        }
+
+        function updateAttachmentTransferInsertion(attachmentId, success, error = '') {
+            const item = attachmentTransfers.find(candidate => candidate.attachment?.id === attachmentId);
+            if (!item) return;
+            if (success) {
+                item.state = 'inserted'; item.notice = ''; item.error = '';
+            } else {
+                item.state = 'uploaded'; item.notice = error || 'Subido · pendiente de insertar';
+            }
+            updateAttachmentTransferItem(item);
+        }
+
+        function insertAttachmentById(attachmentId, targetSessionId) {
+            if (!/^[a-f0-9]{32}$/.test(attachmentId) || targetSessionId !== sessionId) return;
+            if (!attachmentInputAllowed || sessionEnded) {
+                updateAttachmentTransferInsertion(attachmentId, false, 'Subido · esta sesión todavía no puede recibir la referencia.');
+                sendParentMessage({type:'webconsole:attachment-inserted', session_id:sessionId,
+                    attachment_id:attachmentId, success:false,
+                    error:'La sesión no está lista para recibir la referencia; no se insertó.'});
+                return;
+            }
+            fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`, {
+                headers:{'X-WebConsole-Session':token}, credentials:'same-origin',
+            }).then(async response => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || `No se pudo recuperar el adjunto (${response.status}).`);
+                if (!attachmentInputAllowed || sessionEnded) throw new Error('La sesión dejó de estar lista; la referencia no se insertó.');
+                if (!attachmentReference(data.attachment?.path)) throw new Error('La terminal no está conectada o la ruta no es segura; no se insertó la referencia.');
+                updateAttachmentTransferInsertion(attachmentId, true);
+                sendParentMessage({type:'webconsole:attachment-inserted', session_id:sessionId,
+                    attachment_id:attachmentId, success:true});
+            }).catch(error => {
+                updateAttachmentTransferInsertion(attachmentId, false, `Subido · ${error.message}`);
+                sendParentMessage({type:'webconsole:attachment-inserted', session_id:sessionId,
+                    attachment_id:attachmentId, success:false, error:error.message});
+            });
+        }
+
+        function formatAttachmentBytes(bytes) {
+            if (bytes < 1024) return `${bytes} B`;
+            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+            return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+        }
+
+        function attachmentTransferStatus(item) {
+            if (item.state === 'queued') return 'En cola';
+            if (item.state === 'uploading') return `Subiendo · ${item.progress}% · ${formatAttachmentBytes(item.loaded)} / ${formatAttachmentBytes(item.size)}`;
+            if (item.state === 'processing') return 'Transferido · validando';
+            if (item.state === 'inserted') return 'Subido · referencia insertada, no enviada';
+            if (item.state === 'uploaded') return item.notice || 'Subido · pendiente de insertar';
+            return item.error || 'No se pudo subir';
+        }
+
+        function updateAttachmentTransferSummary() {
+            const active = attachmentTransfers.filter(item => item.state === 'uploading' || item.state === 'processing').length;
+            const queued = attachmentTransfers.filter(item => item.state === 'queued').length;
+            const failed = attachmentTransfers.filter(item => item.state === 'failed').length;
+            const completed = attachmentTransfers.filter(item => item.state === 'uploaded' || item.state === 'inserted').length;
+            let summary = active ? `${active} subiendo${queued ? ` · ${queued} en cola` : ''}`
+                : queued ? `${queued} en cola` : `${completed} completado${completed === 1 ? '' : 's'}${failed ? ` · ${failed} con error` : ''}`;
+            const target = document.getElementById('attachment-transfer-summary');
+            if (target && target.textContent !== summary) target.textContent = summary;
+        }
+
+        function updateAttachmentTransferItem(item) {
+            const row = item.row;
+            if (!row) return;
+            row.dataset.state = item.state;
+            item.status.textContent = attachmentTransferStatus(item);
+            item.status.title = item.state === 'failed' ? item.error : '';
+            const showProgress = ['uploading', 'processing', 'uploaded', 'inserted'].includes(item.state);
+            item.progressBar.hidden = !showProgress;
+            item.progressBar.setAttribute('aria-valuenow', String(item.progress));
+            item.progressBar.setAttribute('aria-valuetext', `${item.progress}%`);
+            item.progressFill.style.width = `${item.progress}%`;
+            item.retry.hidden = item.state !== 'failed' || !item.retryable;
+            item.retry.disabled = item.state !== 'failed' || !item.retryable || !item.file;
+            updateAttachmentTransferSummary();
+        }
+
+        function createAttachmentTransfer(file) {
+            const item = {
+                file, name:file.name || 'Adjunto', size:file.size || 0,
+                state:'queued', progress:0, loaded:0, error:'', notice:'', retryable:true, xhr:null,
+                id:`attachment-transfer-${nextAttachmentTransferId++}`,
+            };
+            const row = document.createElement('article');
+            row.className = 'attachment-transfer-item';
+            row.id = item.id;
+            row.dataset.state = item.state;
+            const details = document.createElement('div');
+            details.className = 'attachment-transfer-details';
+            const name = document.createElement('strong');
+            name.className = 'attachment-transfer-name';
+            name.textContent = item.name;
+            name.title = item.name;
+            const meta = document.createElement('small');
+            meta.className = 'attachment-transfer-size';
+            meta.textContent = formatAttachmentBytes(item.size);
+            const status = document.createElement('span');
+            status.className = 'attachment-transfer-status';
+            const actions = document.createElement('div');
+            actions.className = 'attachment-transfer-actions';
+            const retry = document.createElement('button');
+            retry.className = 'attachment-transfer-retry';
+            retry.type = 'button'; retry.textContent = 'Reintentar'; retry.hidden = true;
+            retry.addEventListener('click', () => {
+                if (!item.file || item.state !== 'failed' || !item.retryable) return;
+                attachmentTransferDismissed = false;
+                document.getElementById('attachment-transfer-panel').hidden = false;
+                item.state = 'queued'; item.progress = 0; item.loaded = 0; item.error = ''; item.notice = '';
+                updateAttachmentTransferItem(item);
+                processAttachmentTransferQueue();
+            });
+            actions.append(retry);
+            const progressBar = document.createElement('div');
+            progressBar.className = 'attachment-transfer-progress';
+            progressBar.setAttribute('role', 'progressbar');
+            progressBar.setAttribute('aria-label', `Subida de ${item.name}`);
+            progressBar.setAttribute('aria-valuemin', '0');
+            progressBar.setAttribute('aria-valuemax', '100');
+            progressBar.hidden = true;
+            const progressFill = document.createElement('span');
+            progressFill.className = 'attachment-transfer-progress-fill';
+            progressBar.append(progressFill);
+            details.append(name, meta, status);
+            row.append(details, actions, progressBar);
+            item.row = row; item.status = status; item.retry = retry;
+            item.progressBar = progressBar; item.progressFill = progressFill;
+            attachmentTransfers.push(item);
+            document.getElementById('attachment-transfer-list').append(row);
+            const panel = document.getElementById('attachment-transfer-panel');
+            panel.hidden = attachmentTransferDismissed;
+
+            if (!isSupportedAttachment(file)) {
+                item.state = 'failed'; item.error = 'Formato no admitido. Usa imagen, audio, vídeo o PDF.';
+                item.retryable = false; item.file = null;
+            } else if (!item.size) {
+                item.state = 'failed'; item.error = 'El archivo está vacío.';
+                item.retryable = false; item.file = null;
+            } else if (item.size > MAX_ATTACHMENT_BYTES) {
+                item.state = 'failed'; item.error = 'Supera el límite de 25 MiB.';
+                item.retryable = false; item.file = null;
+            }
+            updateAttachmentTransferItem(item);
+
+            while (attachmentTransfers.length > MAX_VISIBLE_ATTACHMENT_TRANSFERS) {
+                const stale = attachmentTransfers.find(candidate => !candidate.xhr
+                    && !['queued', 'uploading', 'processing'].includes(candidate.state));
+                if (!stale || stale === item) break;
+                attachmentTransfers.splice(attachmentTransfers.indexOf(stale), 1);
+                stale.file = null;
+                stale.row?.remove();
+            }
+            return item;
+        }
+
+        function failAttachmentTransfer(item, message, retryable = true) {
+            item.state = 'failed';
+            item.error = message;
+            item.retryable = retryable;
+        }
+
+        function uploadAttachmentTransfer(item) {
+            return new Promise(resolve => {
+                const request = new XMLHttpRequest();
+                const form = new FormData();
+                form.append('files', item.file, item.name || 'attachment');
+                item.xhr = request; item.state = 'uploading'; item.progress = 0; item.loaded = 0;
+                updateAttachmentTransferItem(item);
+                let settled = false;
+                const finish = () => {
+                    if (settled) return;
+                    settled = true;
+                    item.xhr = null;
+                    updateAttachmentTransferItem(item);
+                    resolve();
+                };
+                request.open('POST', `/api/sessions/${encodeURIComponent(sessionId)}/attachments`);
+                request.withCredentials = true;
+                request.timeout = 300000;
+                request.setRequestHeader('X-WebConsole', '1');
+                request.setRequestHeader('X-WebConsole-Session', token);
+                request.upload.addEventListener('progress', event => {
+                    if (event.lengthComputable && item.state === 'uploading') {
+                        item.progress = Math.min(99, Math.floor(event.loaded / event.total * 100));
+                        item.loaded = Math.min(item.size, event.loaded);
+                        updateAttachmentTransferItem(item);
+                    }
+                });
+                request.upload.addEventListener('load', () => {
+                    item.state = 'processing'; item.progress = 100; item.loaded = item.size;
+                    updateAttachmentTransferItem(item);
+                });
+                request.addEventListener('load', () => {
+                    let data = {};
+                    try { data = JSON.parse(request.responseText || '{}'); } catch (_) {}
+                    if (request.status < 200 || request.status >= 300) {
+                        const retryable = request.status === 0 || request.status >= 500
+                            || request.status === 408 || request.status === 429;
+                        failAttachmentTransfer(item, data.error || `La subida falló (${request.status || 'sin conexión'}).`, retryable);
+                        finish();
+                        return;
+                    }
+                    const attachment = data.attachments?.[0];
+                    if (!attachment?.id || !attachment?.path) {
+                        failAttachmentTransfer(item, 'El servidor no confirmó el archivo. Puedes reintentar.');
+                        finish();
+                        return;
+                    }
+                    item.attachment = attachment;
+                    item.file = null;
+                    item.progress = 100; item.loaded = item.size;
+                    let inserted = false;
+                    try { inserted = Boolean(attachmentInputAllowed && !sessionEnded && attachmentReference(attachment.path)); } catch (_) {}
+                    item.state = inserted ? 'inserted' : 'uploaded';
+                    item.notice = inserted ? '' : 'Subido · pendiente de insertar';
+                    sendParentMessage({type:'webconsole:attachment-uploaded', session_id:sessionId, attachment, inserted});
+                    finish();
+                });
+                request.addEventListener('error', () => {
+                    failAttachmentTransfer(item, 'Se perdió la conexión durante la subida. Puedes reintentar.');
+                    finish();
+                });
+                request.addEventListener('timeout', () => {
+                    failAttachmentTransfer(item, 'La subida tardó demasiado. Puedes reintentar.');
+                    finish();
+                });
+                try { request.send(form); }
+                catch (_) {
+                    failAttachmentTransfer(item, 'No se pudo iniciar la subida. Puedes reintentar.');
+                    finish();
+                }
+            });
+        }
+
+        async function processAttachmentTransferQueue() {
+            if (attachmentUploadActive) return;
+            attachmentUploadActive = true;
+            try {
+                while (true) {
+                    const next = attachmentTransfers.find(item => item.state === 'queued' && item.file);
+                    if (!next) break;
+                    try { await uploadAttachmentTransfer(next); }
+                    catch (error) {
+                        next.xhr = null;
+                        failAttachmentTransfer(next, error.message || 'No se pudo iniciar la subida.');
+                        updateAttachmentTransferItem(next);
+                    }
+                }
+            } finally {
+                attachmentUploadActive = false;
+                updateAttachmentTransferSummary();
+            }
+        }
+
+        function uploadAttachmentFiles(files) {
+            const candidates = (Array.isArray(files) ? files : []).filter(file => file
+                && typeof file.name === 'string' && Number.isFinite(file.size) && file.size >= 0
+                && typeof file.slice === 'function');
+            if (!candidates.length) {
+                showToast('No se pudo leer ningún archivo del portapapeles.');
+                return;
+            }
+            attachmentTransferDismissed = false;
+            const panel = document.getElementById('attachment-transfer-panel');
+            panel.hidden = false;
+            for (const file of candidates) createAttachmentTransfer(file);
+            processAttachmentTransferQueue();
+        }
+
+        document.getElementById('attachment-transfer-close')?.addEventListener('click', () => {
+            attachmentTransferDismissed = true;
+            document.getElementById('attachment-transfer-panel').hidden = true;
+        });
+
+        function copyTerminalSelection() {
+            const selected = terminal.getSelection();
+            if (!selected) return;
+            const fallback = () => {
+                const textarea = document.createElement('textarea');
+                textarea.value = selected;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed'; textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                let copied = false;
+                try { copied = document.execCommand('copy'); } catch (_) {}
+                textarea.remove();
+                if (!copied) showToast('No se pudo acceder al portapapeles. Selecciona el texto y usa la acción Copiar del navegador.');
+            };
+            if (navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(selected).catch(fallback);
+            } else fallback();
+        }
+
+        function interruptTerminal() {
+            if (!transportReady || !ws || ws.readyState !== WebSocket.OPEN) {
+                showToast('La terminal no está conectada; no se envió Ctrl+C.');
+                return;
+            }
+            sendInput('\x03');
+        }
+
+        // The workspace parent may request only these documented, fixed actions.
+        // Never accept arbitrary terminal text through postMessage.
+        const agentActions = {
+            'interrupt': () => sendInput('\x03'),
+            'opencode-agent': () => sendInput('\x1b[Z'),
+            'opencode-variant': () => sendInput('\x14'),
+            'opencode-palette': () => sendInput('\x10'),
+            'opencode-model': () => { sendInput('\x18'); setTimeout(() => sendInput('m'), 150); },
+            'codex-model': () => sendInput('/model\r'),
+            'codex-permissions': () => sendInput('/permissions\r'),
+            'codex-review': () => sendInput('/review\r'),
+        };
+        window.addEventListener('message', event => {
+            if (!embedded || event.origin !== window.location.origin || event.source !== window.parent) return;
+            if (event.data?.type === 'webconsole:session-state' && event.data.session_id === sessionId) {
+                attachmentInputAllowed = Boolean(event.data.input_allowed) && event.data.state !== 'permission';
+                return;
+            }
+            if (event.data?.type === 'webconsole:interrupt' && event.data.session_id === sessionId) {
+                const success = Boolean(transportReady && ws && ws.readyState === WebSocket.OPEN && !sessionEnded);
+                if (success) sendInput('\x03');
+                sendParentMessage({type:'webconsole:interrupt-result', session_id:sessionId, success});
+                return;
+            }
+            if (event.data?.type === 'webconsole:upload-attachments' && event.data.session_id === sessionId) {
+                if (sessionRole !== 'workspace_shell') uploadAttachmentFiles(event.data.files);
+                return;
+            }
+            if (event.data?.type === 'webconsole:insert-attachment') {
+                insertAttachmentById(event.data.attachment_id, event.data.session_id);
+                return;
+            }
+            if (event.data?.type === 'webconsole:resize') {
+                scheduleResize();
+                return;
+            }
+            const action = event.data?.type === 'webconsole:agent-action' && event.data.session_id === sessionId
+                ? event.data.action : '';
+            const execute = agentActions[action];
+            const success = Boolean(execute && transportReady && ws && ws.readyState === WebSocket.OPEN);
+            if (success) execute();
+            window.parent.postMessage({type: 'webconsole:action-result', action, session_id:sessionId, success}, event.origin);
+        });
 
         function isPrintableText(data) {
             // Accept pasted/multichar Unicode text, but not C0 controls or ESC sequences.
@@ -544,6 +1049,7 @@
         function updateLocalInputUI() {
             document.getElementById('status-input-mode').textContent = localInputMode ? 'Local' : 'Live';
             document.getElementById('local-input-btn').classList.toggle('active', localInputMode);
+            document.getElementById('local-input-btn').setAttribute('aria-pressed', String(localInputMode));
             localComposer.classList.toggle('hidden', !localInputMode);
             renderLocalInput();
             hideSuggestions();
@@ -569,25 +1075,124 @@
         updateLocalInputUI();
 
         // One socket and one heartbeat per tab. tmux redraws the screen on attach.
+        function markTerminalRendered() {
+            if (terminalReady) return;
+            terminalReady = true;
+            terminalHasRendered = true;
+            reconnectAttempts = 0;
+            updateConnectionStatus('connected');
+            reportTerminalState('rendered');
+            sendResize();
+        }
+
+        function createTerminalFlowState() {
+            return {
+                enabled: false,
+                expectedSequence: 1n,
+                queue: [],
+                active: null,
+                pendingBytes: 0,
+                lagTimer: null,
+                resyncing: false,
+            };
+        }
+
+        function scheduleTerminalLagCheck(socket, flowState) {
+            clearTimeout(flowState.lagTimer);
+            if (flowState.resyncing || ws !== socket) return;
+            const oldest = flowState.active || flowState.queue[0];
+            if (!oldest) return;
+            const remaining = TERMINAL_RENDER_LAG_MS - (Date.now() - oldest.queuedAt);
+            flowState.lagTimer = setTimeout(() => {
+                if (ws !== socket || flowState.resyncing) return;
+                const current = flowState.active || flowState.queue[0];
+                if (current && Date.now() - current.queuedAt >= TERMINAL_RENDER_LAG_MS) {
+                    requestTerminalResync(socket, flowState);
+                } else {
+                    scheduleTerminalLagCheck(socket, flowState);
+                }
+            }, Math.max(20, remaining + 20));
+        }
+
+        function drainTerminalFrames(socket, flowState) {
+            if (flowState.resyncing || flowState.active || !flowState.queue.length || ws !== socket) return;
+            const item = flowState.queue.shift();
+            flowState.active = item;
+            scheduleTerminalLagCheck(socket, flowState);
+            terminal.write(item.payload, () => {
+                if (flowState.active !== item) return;
+                flowState.active = null;
+                if (flowState.resyncing || ws !== socket) {
+                    flowState.pendingBytes = 0;
+                    clearTimeout(flowState.lagTimer);
+                    return;
+                }
+                flowState.pendingBytes = Math.max(0, flowState.pendingBytes - item.payload.byteLength);
+                if (flowState.enabled && socket.readyState === WebSocket.OPEN) {
+                    try { socket.send(JSON.stringify({type:'ack', seq:item.sequence.toString()})); } catch (_) {}
+                }
+                markTerminalRendered();
+                scheduleTerminalLagCheck(socket, flowState);
+                drainTerminalFrames(socket, flowState);
+            });
+        }
+
+        function enqueueTerminalFrame(socket, flowState, sequence, payload) {
+            if (flowState.resyncing) return;
+            if (sequence !== flowState.expectedSequence) {
+                requestTerminalResync(socket, flowState);
+                return;
+            }
+            flowState.expectedSequence++;
+            const item = {sequence, payload, queuedAt:Date.now()};
+            flowState.queue.push(item);
+            flowState.pendingBytes += payload.byteLength;
+            if (flowState.pendingBytes > TERMINAL_RENDER_QUEUE_LIMIT) {
+                requestTerminalResync(socket, flowState);
+                return;
+            }
+            drainTerminalFrames(socket, flowState);
+        }
+
+        function requestTerminalResync(socket, flowState) {
+            if (ws !== socket || flowState.resyncing || sessionEnded) return;
+            flowState.resyncing = true;
+            flowState.queue.length = 0;
+            flowState.pendingBytes = flowState.active?.payload.byteLength || 0;
+            clearTimeout(flowState.lagTimer);
+            updateConnectionStatus('resyncing');
+            reportTerminalState('resyncing');
+            showToast('La vista se quedó atrás; se recuperará el estado actual de la sesión.');
+            try { socket.close(4000, 'Resynchronizing terminal view'); } catch (_) {}
+        }
+
         function connect() {
             if (sessionEnded || (ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(ws.readyState))) return;
             clearTimeout(reconnectTimer);
+            const dims = proposeTerminalDimensions();
+            // A hidden/zero-sized iframe must not negotiate guessed dimensions.
+            // Its parent sends webconsole:resize when the pane becomes visible.
+            if (!dims) return;
             updateConnectionStatus('connecting');
             terminalReady = false;
             transportReady = false;
+            reportTerminalState(terminalHasRendered ? 'reconnecting' : 'connecting');
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const dims = fitAddon.proposeDimensions() || {cols: 120, rows: 30};
-            const query = new URLSearchParams({token, cols: Math.max(20, dims.cols), rows: Math.max(5, dims.rows)});
+            const initialCols = Math.max(20, Math.min(500, dims.cols));
+            const initialRows = Math.max(5, Math.min(200, dims.rows));
+            lastSentDimensions = {cols:initialCols, rows:initialRows};
+            const query = new URLSearchParams({token, cols: initialCols, rows: initialRows, flow:TERMINAL_FLOW_VERSION});
             const socket = new WebSocket(`${protocol}//${window.location.host}/ws/${sessionId}?${query}`);
+            const flowState = createTerminalFlowState();
             ws = socket;
             socket.binaryType = 'arraybuffer';
             lastResponseAt = Date.now();
 
             socket.onopen = () => {
                 if (ws !== socket) return;
-                // Connection is ready only after the terminal receives its redraw.
-                terminal.reset();
+                // Keep the last rendered screen visible until tmux redraws it.
                 lastResponseAt = Date.now();
+                scheduleResize();
             };
             socket.onmessage = event => {
                 if (ws !== socket) return;
@@ -596,34 +1201,41 @@
                     try {
                         const frame = new Uint8Array(event.data);
                         if (!frame.length) return;
-                        if (frame[0] !== 0 && frame[0] !== 1) throw new Error('Invalid terminal frame');
-                        const payload = frame[0] === 1 ? pako.inflate(frame.subarray(1)) : frame.subarray(1);
-                        terminal.write(payload, () => {
-                            if (ws !== socket) return;
-                            if (!terminalReady) {
-                                terminalReady = true;
-                                reconnectAttempts = 0;
-                                updateConnectionStatus('connected');
-                                sendResize();
-                            }
-                        });
+                        if (frame[0] === 2 || frame[0] === 3) {
+                            if (!flowState.enabled || frame.byteLength < 9) throw new Error('Unexpected sequenced terminal frame');
+                            const sequence = new DataView(event.data).getBigUint64(1, false);
+                            const payload = frame[0] === 3 ? pako.inflate(frame.subarray(9)) : frame.subarray(9);
+                            enqueueTerminalFrame(socket, flowState, sequence, payload);
+                        } else {
+                            if (frame[0] !== 0 && frame[0] !== 1) throw new Error('Invalid terminal frame');
+                            const payload = frame[0] === 1 ? pako.inflate(frame.subarray(1)) : frame.subarray(1);
+                            terminal.write(payload, () => {
+                                if (ws === socket) markTerminalRendered();
+                            });
+                        }
                     } catch (_) {
-                        showToast('Error al recuperar la terminal; reconectando');
-                        socket.close();
+                        if (flowState.enabled) requestTerminalResync(socket, flowState);
+                        else {
+                            showToast('Error al recuperar la terminal; reconectando');
+                            socket.close();
+                        }
                     }
                     return;
                 }
                 try {
                     const msg = JSON.parse(event.data);
                     if (msg.type === 'ready') {
+                        flowState.enabled = msg.flow_version === TERMINAL_FLOW_VERSION;
                         transportReady = true;
                     } else if (msg.type === 'pong') {
                         document.getElementById('status-latency').textContent = (Date.now() - lastPingTime) + 'ms';
                     } else if (msg.type === 'ended') {
                         sessionEnded = true;
+                        reportTerminalState('ended');
                         showToast('La sesión terminó. Crea otra desde el panel.');
                         socket.close();
                     } else if (msg.type === 'error') {
+                        reportTerminalState('error');
                         showToast(msg.data);
                         socket.close();
                     }
@@ -636,19 +1248,39 @@
                 ws = null;
                 terminalReady = false;
                 transportReady = false;
-                updateConnectionStatus('disconnected');
+                const wasResyncRequested = flowState.resyncing;
+                clearTimeout(flowState.lagTimer);
+                flowState.resyncing = true;
+                flowState.queue.length = 0;
+                flowState.pendingBytes = 0;
+                const resyncing = wasResyncRequested || event.code === 1013 || event.code === 4000;
+                updateConnectionStatus(resyncing ? 'resyncing' : 'disconnected');
                 if (event.code === 1008) {
                     sessionEnded = true;
+                    reportTerminalState('unavailable');
                     showToast('Sesión no disponible o límite de conexiones alcanzado.');
                 }
                 if (!sessionEnded) {
+                    reportTerminalState(resyncing ? 'resyncing' : 'reconnecting');
                     reconnectAttempts++;
-                    const delay = Math.min(1000 * 2 ** Math.min(reconnectAttempts - 1, 5), 30000);
-                    reconnectTimer = setTimeout(connect, delay + Math.random() * 500);
+                    let delay;
+                    if (resyncing) {
+                        const now = Date.now();
+                        const sinceLastResync = now - lastResyncAt;
+                        delay = lastResyncAt && sinceLastResync < TERMINAL_RESYNC_COOLDOWN_MS
+                            ? Math.max(1000, TERMINAL_RESYNC_COOLDOWN_MS - sinceLastResync) : 500;
+                        lastResyncAt = now;
+                    } else {
+                        delay = Math.min(1000 * 2 ** Math.min(reconnectAttempts - 1, 5), 30000) + Math.random() * 500;
+                    }
+                    reconnectTimer = setTimeout(connect, delay);
                 }
             };
             socket.onerror = () => {
-                if (ws === socket) updateConnectionStatus('error');
+                if (ws === socket) {
+                    updateConnectionStatus('error');
+                    reportTerminalState('error');
+                }
             };
         }
 
@@ -679,6 +1311,11 @@
                     badge.innerHTML = '<span class="dot pulse"></span> Connecting';
                     indicator.style.background = '#FBBC05';
                     label.textContent = 'Connecting';
+                    break;
+                case 'resyncing':
+                    badge.innerHTML = '<span class="dot pulse"></span> Syncing';
+                    indicator.style.background = '#FBBC05';
+                    label.textContent = 'Syncing';
                     break;
             }
         }
@@ -719,6 +1356,7 @@
         });
         window.addEventListener('pagehide', () => {
             clearTimeout(reconnectTimer);
+            touchScroll.dispose();
             if (ws) {
                 const socket = ws;
                 ws = null;
@@ -771,7 +1409,7 @@
         // Keyboard shortcuts
         terminal.attachCustomKeyEventHandler((e) => {
             // Ctrl+B toggles local/live input mode.
-            if (e.ctrlKey && e.key.toLowerCase() === 'b') {
+            if (!embedded && e.ctrlKey && e.key.toLowerCase() === 'b') {
                 e.preventDefault();
                 toggleLocalInput();
                 return false;
@@ -785,12 +1423,28 @@
                 }
                 return false;
             }
-            // Ctrl+C
-            if (e.ctrlKey && e.key === 'c' && terminal.hasSelection()) {
-                // Copy selection
-                return true;
+            // Plain Ctrl+C remains native and sends ETX; copy requires Shift (Cmd+C on macOS).
+            return window.WebConsoleTerminalShortcuts.handleTerminalCopyShortcut(
+                e, terminal.hasSelection(), copyTerminalSelection);
+        });
+
+        document.addEventListener('paste', event => {
+            const files = mediaFilesFromClipboard(event);
+            if (!files.length) return; // Preserve native text paste.
+            event.preventDefault();
+            event.stopPropagation();
+            const alsoHasText = Boolean(event.clipboardData?.getData('text/plain'));
+            if (sessionRole === 'workspace_shell') {
+                showToast('Los adjuntos se insertan desde una sesión de agente, no en la shell del workspace.');
+                return;
             }
-            return true;
+            if (alsoHasText) showToast('Se adjuntarán los archivos; pega el texto del portapapeles por separado.');
+            uploadAttachmentFiles(files);
+        }, true);
+        document.getElementById('attach-terminal')?.addEventListener('click', () => document.getElementById('attachment-picker')?.click());
+        document.getElementById('attachment-picker')?.addEventListener('change', event => {
+            if (event.target.files?.length) uploadAttachmentFiles([...event.target.files]);
+            event.target.value = '';
         });
     </script>
 </body>

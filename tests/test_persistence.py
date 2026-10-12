@@ -1,8 +1,10 @@
 import base64
 import importlib.util
+import json
 import threading
 import os
 import socket
+import statistics
 import subprocess
 import urllib.request
 import time
@@ -56,7 +58,13 @@ def read_until(ws, expected):
     while time.monotonic() < deadline:
         frame = ws.recv(timeout=3)
         if isinstance(frame, bytes):
-            output.extend(zlib.decompress(frame[1:]) if frame[0] == 1 else frame[1:])
+            if frame[0] in (2, 3):
+                sequence = int.from_bytes(frame[1:9], 'big')
+                payload = zlib.decompress(frame[9:]) if frame[0] == 3 else frame[9:]
+                ws.send(json.dumps({'type':'ack', 'seq':str(sequence)}))
+                output.extend(payload)
+            else:
+                output.extend(zlib.decompress(frame[1:]) if frame[0] == 1 else frame[1:])
         if expected in output:
             return bytes(output)
     pytest.fail(f'No terminal redraw containing {expected!r}: {output!r}')
@@ -110,6 +118,59 @@ def test_two_tabs_receive_the_same_output(live_server):
         first.send(b"printf 'BOTH_TABS_123\\n'\r")
         read_until(first, b'BOTH_TABS_123')
         read_until(second, b'BOTH_TABS_123')
+
+
+@pytest.mark.parametrize('flow', [False, True], ids=['legacy', 'sequenced'])
+def test_interactive_shell_echo_round_trip_latency(live_server, flow):
+    data = create_session()
+    flow_query = '&flow=1' if flow else ''
+    url = live_server.replace('http:', 'ws:') + f"/ws/{data['id']}?token={data['token']}{flow_query}"
+    samples = []
+    with connect(url, origin=live_server) as ws:
+        read_until(ws, b'\x1b')
+        for index in range(7):
+            marker = f'INPUT_ECHO_BENCH_{index}'.encode()
+            started = time.perf_counter()
+            ws.send(b"printf '" + marker + b"\\n'\r")
+            read_until(ws, marker)
+            samples.append((time.perf_counter() - started) * 1000)
+    print(f'isolated local terminal input echo ms (sequenced={flow}): median={statistics.median(samples):.2f}, max={max(samples):.2f}')
+    # Broad local limit catches stalls while tolerating slower CI hosts.
+    assert max(samples) < 500
+
+
+def test_pty_output_batch_keeps_the_interactive_coalescing_window_short():
+    assert server.TERMINAL_PTY_COALESCE_SECONDS <= 0.005
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_blocking(read_fd, False)
+        expected = b'pty echo ' * 300
+        os.write(write_fd, expected)
+        actual, closed = server.read_pty_output_batch(read_fd)
+        assert actual == expected
+        assert closed is False
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_websocket_low_latency_tuning_sets_tcp_nodelay():
+    class FakeSocket:
+        def __init__(self):
+            self.options = []
+
+        def setsockopt(self, level, option, value):
+            self.options.append((level, option, value))
+
+    class FakeWebSocket:
+        def __init__(self, sock):
+            self.sock = sock
+
+    sock = FakeSocket()
+    assert server.enable_websocket_low_latency(FakeWebSocket(sock)) is True
+    assert sock.options == [(server.socket.IPPROTO_TCP, server.socket.TCP_NODELAY, 1)]
+
+    assert server.enable_websocket_low_latency(object()) is False
 
 
 def test_unknown_url_does_not_create_session():

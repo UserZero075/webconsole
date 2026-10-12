@@ -1,0 +1,10 @@
+{
+  "lock_sha256": "3a33341e1d5b78e103ba9d6796fdefed7c63b55b504a0aaef0a3f5f4832954c1",
+  "assets": [
+    "editor.js",
+    "markdown.js",
+    "merge.js"
+  ],
+  "third_party_notices": "THIRD-PARTY-NOTICES.md",
+  "generated_by": "tools/editor-assets/build.mjs"
+}

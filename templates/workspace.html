@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
+    <title>Workspace · WebConsole</title>
+    <link rel="stylesheet" href="/static/css/workspace.css?v={{ asset_version('css/workspace.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="/" aria-label="WebConsole, workspace"><span class="brand-mark">w</span><span>WebConsole</span></a>
+        <div class="top-separator"></div>
+        <div class="top-context"><span id="top-project">Sin proyecto seleccionado</span><span id="top-workspace"></span></div>
+        <div class="top-actions">
+            <button class="mobile-nav-button" id="toggle-projects" type="button" aria-label="Mostrar proyectos" aria-controls="project-sidebar" aria-expanded="false">Proyectos</button>
+            <button class="mobile-nav-button" id="toggle-inspector" type="button" aria-label="Mostrar archivos" aria-controls="inspector" aria-expanded="false">Archivos</button>
+            <a class="quiet-link" href="/sessions">Resumen</a>
+            <button class="top-button" id="add-project" aria-label="Añadir proyecto" title="Añadir proyecto"><span aria-hidden="true">＋</span><span class="top-button-label">Proyecto</span></button>
+            <button class="top-button primary" id="add-agent" aria-label="Crear agente" title="Crear agente" disabled><span aria-hidden="true">＋</span><span class="top-button-label">Agente</span></button>
+        </div>
+    </header>
+
+    <main class="workbench">
+        <div class="drawer-backdrop" id="mobile-drawer-backdrop" hidden aria-hidden="true"></div>
+        <aside class="project-sidebar" id="project-sidebar" tabindex="-1" aria-label="Proyectos y agentes">
+            <div class="sidebar-heading"><span>Proyectos</span><button class="mini-button" id="refresh-all" title="Actualizar workspace" aria-label="Actualizar workspace">↻</button></div>
+            <label class="project-search"><span aria-hidden="true">⌕</span><input id="project-search" type="search" placeholder="Buscar proyecto o agente" autocomplete="off"></label>
+            <div class="project-tree" id="project-tree" aria-live="polite"><div class="sidebar-loading">Cargando proyectos…</div></div>
+            <div class="sidebar-bottom"><a href="/sessions">Ver actividad de todas las sesiones</a></div>
+        </aside>
+
+        <section class="center-pane" aria-label="Área de trabajo">
+            <div class="pane-toolbar">
+                <div class="work-title"><strong id="work-title">Workspace</strong><span id="work-subtitle">Selecciona un proyecto</span></div>
+                <div class="toolbar-actions">
+                    <select id="branch-picker" aria-label="Abrir workspace o rama" disabled><option>Rama o workspace</option></select>
+                    <button class="square-button" id="new-worktree" title="Crear worktree aislado" aria-label="Crear worktree aislado" disabled>⑂</button>
+                    <button class="terminal-action" id="interrupt-agent" type="button" title="Enviar Ctrl+C al agente activo" disabled>Interrumpir</button>
+                </div>
+            </div>
+            <nav class="tab-strip" id="tab-strip" aria-label="Pestañas de trabajo"></nav>
+            <div class="work-surface" id="work-surface">
+                <div class="welcome-view" id="welcome-view">
+                    <div class="welcome-glyph">⌘</div>
+                    <h1 id="welcome-title">Un proyecto, todos tus agentes.</h1>
+                    <p id="welcome-copy">Registra una carpeta para abrir sus ramas, archivos y sesiones persistentes en un mismo espacio.</p>
+                    <button class="top-button primary" id="welcome-action">Añadir proyecto</button>
+                </div>
+                <iframe id="terminal-frame" title="Terminal del agente" hidden></iframe>
+                <div class="terminal-loading" id="terminal-loading" role="status" aria-live="polite" aria-busy="true" hidden>
+                    <span class="loading-orbit" aria-hidden="true"><span></span></span>
+                    <strong id="terminal-loading-title">Preparando terminal</strong>
+                    <span id="terminal-loading-detail">Cargando la interfaz del agente…</span>
+                    <button class="terminal-action" id="terminal-loading-retry" type="button" hidden>Reintentar conexión</button>
+                </div>
+                <section class="editor-view" id="editor-view" data-markdown-src="/static/js/lib/editor/markdown.js?v={{ asset_version('js/lib/editor/markdown.js') }}" data-merge-src="/static/js/lib/editor/merge.js?v={{ asset_version('js/lib/editor/merge.js') }}" hidden aria-label="Editor de archivos">
+                    <div class="editor-toolbar">
+                        <div class="editor-heading">
+                            <div class="navigation-buttons" role="group" aria-label="Historial de navegación">
+                                <button class="square-button" id="history-back" type="button" title="Atrás" aria-label="Atrás" disabled>←</button>
+                                <button class="square-button" id="history-forward" type="button" title="Adelante" aria-label="Adelante" disabled>→</button>
+                            </div>
+                            <strong id="editor-path"></strong><span id="editor-state">Sin cambios</span>
+                        </div>
+                        <div class="editor-actions">
+                            <div class="markdown-modes" id="markdown-modes" role="group" aria-label="Modo Markdown" hidden>
+                                <button class="mode-button" type="button" data-editor-mode="code">Código</button>
+                                <button class="mode-button" type="button" data-editor-mode="preview">Vista previa</button>
+                                <button class="mode-button" type="button" data-editor-mode="split">Dividida</button>
+                            </div>
+                            <button class="square-button" id="reload-file" title="Recargar archivo" aria-label="Recargar archivo">↻</button>
+                            <button class="top-button primary save-button" id="save-file" disabled>Guardar</button>
+                        </div>
+                    </div>
+                    <div class="conflict-panel" id="conflict-panel" hidden></div>
+                    <div class="editor-content" id="editor-content">
+                        <section class="editor-code-pane" id="file-editor-pane" aria-label="Código fuente"><div id="editor-host"></div></section>
+                        <article class="markdown-preview" id="markdown-preview" aria-label="Vista previa Markdown" hidden></article>
+                        <section class="diff-panel" id="diff-panel" aria-label="Comparación Git" hidden>
+                            <div class="diff-toolbar"><strong id="diff-labels"></strong><span id="diff-status"></span><button class="text-button" id="diff-open-code" type="button" hidden>Abrir código</button></div>
+                            <div class="diff-merge" id="diff-merge"></div>
+                        </section>
+                    </div>
+                    <div class="editor-placeholder" id="editor-placeholder">Abriendo archivo…</div>
+                </section>
+            </div>
+            <section class="workspace-terminal" id="workspace-terminal" aria-label="Terminal del workspace">
+                <div class="terminal-resize" id="terminal-resize" role="separator" aria-orientation="horizontal" aria-label="Cambiar altura de la terminal" aria-valuemin="150" aria-valuemax="420" tabindex="0"></div>
+                <div class="terminal-drawer-header">
+                    <button class="terminal-drawer-toggle" id="terminal-drawer-toggle" type="button" aria-expanded="false" aria-controls="terminal-drawer-content" disabled>
+                        <span class="terminal-chevron" aria-hidden="true">⌃</span><strong>Terminal</strong><span class="terminal-context" id="terminal-context">Shell independiente del workspace</span><span class="terminal-state" id="terminal-state">Plegada</span>
+                    </button>
+                    <div class="terminal-drawer-actions">
+                        <button class="terminal-action" id="shell-interrupt" type="button" title="Enviar Ctrl+C a esta terminal" disabled>Interrumpir</button>
+                        <button class="terminal-action" id="shell-start" type="button" hidden>Abrir terminal</button>
+                        <button class="terminal-action" id="shell-new" type="button" hidden>Nueva terminal</button>
+                        <button class="terminal-action" id="workspace-attach" type="button" disabled>Adjuntar</button>
+                        <input id="attachment-picker" type="file" accept="image/*,audio/*,video/*,application/pdf" multiple hidden>
+                    </div>
+                </div>
+                <div class="terminal-drawer-content" id="terminal-drawer-content" hidden>
+                    <div class="attachment-tray" id="attachment-tray" aria-live="polite" hidden></div>
+                    <div class="terminal-ended" id="terminal-ended" hidden>
+                        <span>La terminal terminó; no se reiniciará automáticamente. Usa «Nueva terminal» para crear otra.</span>
+                    </div>
+                    <iframe id="shell-frame" title="Terminal independiente del workspace" hidden></iframe>
+                </div>
+            </section>
+            <div class="bottom-status"><span class="status-led" id="workspace-led"></span><span id="workspace-status">Preparado</span><span class="status-spacer"></span><span id="workspace-path"></span><span id="terminal-hint">Terminal persistente · tmux</span></div>
+        </section>
+
+        <aside class="inspector" id="inspector" tabindex="-1" aria-label="Archivos, Git y mensajes">
+            <section class="explorer-section">
+                <div class="inspector-heading"><span>Archivos</span><button class="mini-button" id="refresh-files" title="Actualizar archivos" aria-label="Actualizar archivos">↻</button></div>
+                <div class="explorer-root" id="explorer-root">Selecciona un workspace</div>
+                <label class="file-search"><span aria-hidden="true">⌕</span><input id="file-search" type="search" placeholder="Filtrar carpeta" autocomplete="off"></label>
+                <div class="file-tree" id="file-tree"><div class="inspector-empty">Los archivos aparecerán aquí.</div></div>
+            </section>
+
+            <section class="git-section">
+                <div class="inspector-heading"><span>Git</span><span class="github-mark" id="github-mark" hidden title="El repositorio tiene un remoto de GitHub">GH</span><button class="mini-button" id="refresh-git" title="Actualizar estado de Git" aria-label="Actualizar estado de Git">↻</button></div>
+                <div class="git-branch" id="git-branch">Sin repositorio Git</div>
+                <div class="git-tools"><select id="remote-picker" aria-label="Remoto para actualizar ramas" hidden></select><button class="text-button" id="fetch-branches" hidden>Actualizar ramas</button></div>
+                <div class="git-changes" id="git-changes"><div class="inspector-empty">Selecciona un workspace para ver sus cambios.</div></div>
+            </section>
+
+            <section class="message-section">
+                <div class="inspector-heading"><span>Mensajes del proyecto</span><span class="message-count" id="message-count"></span></div>
+                <div class="message-feed" id="message-feed"><div class="inspector-empty">Los agentes pueden coordinarse aquí.</div></div>
+                <form class="message-form" id="message-form" hidden>
+                    <select id="message-recipient" aria-label="Agente destinatario"></select>
+                    <div><input id="message-input" maxlength="8192" placeholder="Escribe un mensaje…" aria-label="Mensaje para el agente" required><button type="submit" aria-label="Enviar mensaje">↑</button></div>
+                    <small>Enviar crea un mensaje pendiente; no aprueba ni ejecuta nada.</small>
+                </form>
+            </section>
+        </aside>
+    </main>
+
+    <dialog id="project-dialog" class="form-dialog">
+        <form id="project-form">
+            <div class="dialog-kicker">Nuevo proyecto</div><h2>Registra una carpeta</h2><p>WebConsole leerá su estado Git y abrirá archivos únicamente dentro de sus workspaces.</p>
+            <label>Ruta absoluta<input name="path" required maxlength="4096" placeholder="/home/usuario/proyectos/app" autocomplete="off"></label>
+            <label>Nombre <span>opcional</span><input name="name" maxlength="100" placeholder="El nombre de la carpeta se usa por defecto"></label>
+            <div class="dialog-error" id="project-error" hidden></div>
+            <div class="dialog-actions"><button type="button" class="text-button" data-close="project-dialog">Cancelar</button><button class="top-button primary" type="submit" id="save-project">Registrar proyecto</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="agent-dialog" class="form-dialog">
+        <form id="agent-form">
+            <div class="dialog-kicker">Nueva sesión persistente</div><h2>Inicia un agente</h2><p>Se ejecutará en el workspace elegido y conservará su proceso al cerrar esta pestaña.</p>
+            <label>Agente<select name="agent"><option value="opencode">OpenCode</option><option value="codex">Codex</option><option value="hermes">Hermes</option><option value="terminal">Terminal · detección automática</option></select></label>
+            <label>Workspace<select name="workspace_id" id="agent-workspace" required></select></label>
+            <label>Nombre de la tarea <span>opcional</span><input name="title" maxlength="100" placeholder="Por ejemplo, revisar la autenticación"></label>
+            <div class="dialog-error" id="agent-error" hidden></div>
+            <div class="dialog-actions"><button type="button" class="text-button" data-close="agent-dialog">Cancelar</button><button class="top-button primary" type="submit" id="create-agent">Crear agente</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="worktree-dialog" class="form-dialog">
+        <form id="worktree-form">
+            <div class="dialog-kicker">Aislamiento Git</div><h2>Nuevo worktree</h2><p>Crear un worktree no cambia la rama ni los archivos de los agentes que ya están trabajando.</p>
+            <label>Rama base<select id="worktree-base" required></select></label>
+            <label>Rama de trabajo<input id="worktree-branch" required maxlength="200" placeholder="feature/nueva-tarea" autocomplete="off"></label>
+            <label class="check-row" id="existing-branch-row" hidden><input id="existing-branch" type="checkbox"> Usar la rama local existente, sin crear otra</label>
+            <label>Nombre del workspace <span>opcional</span><input id="worktree-name" maxlength="100" placeholder="Se usará el nombre de la rama"></label>
+            <div class="dialog-error" id="worktree-error" hidden></div>
+            <div class="dialog-actions"><button type="button" class="text-button" data-close="worktree-dialog">Cancelar</button><button class="top-button primary" type="submit" id="create-worktree">Crear worktree</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="agent-actions-dialog" class="form-dialog action-dialog">
+        <div class="dialog-kicker">Acciones de agente</div><h2 id="actions-title">Acciones</h2><p id="actions-description"></p><div class="action-list" id="action-list"></div><div class="dialog-actions"><button class="text-button" data-close="agent-actions-dialog">Cerrar</button></div>
+    </dialog>
+
+    <dialog id="handoff-dialog" class="form-dialog handoff-dialog" aria-labelledby="handoff-title" aria-describedby="handoff-description">
+        <form id="handoff-form">
+            <div class="dialog-kicker">Continuidad de conversación</div>
+            <h2 id="handoff-title">Cambiar de agente</h2>
+            <p id="handoff-description">Se conservará la sesión original. El destino recibirá una exportación privada del historial disponible y un punto de continuación.</p>
+            <div class="handoff-source" id="handoff-source">Comprobando la sesión de origen…</div>
+            <label>Agente destino<select id="handoff-target"><option value="codex">Codex</option><option value="hermes" disabled>Hermes · próximo adaptador</option></select></label>
+            <fieldset class="handoff-modes">
+                <legend>Al iniciar Codex</legend>
+                <label><input type="radio" name="handoff-mode" value="wait" checked><span><strong>Revisar y esperar</strong><small>Leer el contexto, resumirlo y esperar tu siguiente instrucción, sin modificar archivos.</small></span></label>
+                <label><input type="radio" name="handoff-mode" value="continue"><span><strong>Continuar la tarea</strong><small>Leer el contexto y retomar el siguiente paso pendiente con las aprobaciones propias de Codex.</small></span></label>
+            </fieldset>
+            <section class="handoff-preview" id="handoff-preview" hidden>
+                <div class="handoff-preview-meta" id="handoff-preview-meta"></div>
+                <ul class="handoff-warnings" id="handoff-warnings"></ul>
+                <details><summary>Último mensaje del usuario</summary><pre id="handoff-last-user"></pre></details>
+                <details><summary>Última respuesta de OpenCode</summary><pre id="handoff-last-assistant"></pre></details>
+            </section>
+            <div class="handoff-status" id="handoff-status" role="status" aria-live="polite" hidden></div>
+            <div class="dialog-error" id="handoff-error" hidden></div>
+            <div class="dialog-actions">
+                <button class="text-button" id="handoff-cancel" type="button">Cancelar</button>
+                <button class="top-button" id="handoff-prepare" type="button" disabled>Preparar vista previa</button>
+                <button class="top-button primary" id="handoff-confirm" type="button" hidden>Crear Codex y entregar contexto</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="rename-project-dialog" class="form-dialog" aria-labelledby="rename-project-title">
+        <form id="rename-project-form">
+            <div class="dialog-kicker">Proyecto</div><h2 id="rename-project-title">Renombrar proyecto</h2><p>Solo cambia el nombre mostrado en WebConsole; no modifica la carpeta.</p>
+            <label>Nombre<input id="rename-project-name" name="name" required maxlength="100" autocomplete="off"></label>
+            <div class="dialog-error" id="rename-project-error" hidden></div>
+            <div class="dialog-actions"><button type="button" class="text-button" data-close="rename-project-dialog">Cancelar</button><button class="top-button primary" id="save-project-name" type="submit">Guardar nombre</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="form-dialog confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-copy">
+        <form method="dialog">
+            <div class="dialog-kicker" id="confirm-kicker">Confirmación</div><h2 id="confirm-title">¿Continuar?</h2><p id="confirm-copy"></p>
+            <div class="dialog-actions"><button class="text-button" value="cancel">Cancelar</button><button class="top-button danger-button" id="confirm-accept" value="confirm">Continuar</button></div>
+        </form>
+    </dialog>
+
+    <div class="context-menu" id="context-menu" role="menu" aria-label="Opciones" hidden></div>
+
+    <div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
+    <script src="/static/js/mobile-viewport.js?v={{ asset_version('js/mobile-viewport.js') }}" defer></script>
+    <script src="/static/js/lib/editor/editor.js?v={{ asset_version('js/lib/editor/editor.js') }}" defer></script>
+    <script src="/static/js/workspace.js?v={{ asset_version('js/workspace.js') }}" defer></script>
+</body>
+</html>

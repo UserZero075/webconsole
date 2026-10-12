@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="stylesheet" href="/static/js/lib/xterm.css">
+  <style>
+    html, body { width:100%; height:100%; margin:0; overflow:hidden; background:#1a1a2e; }
+    #terminal { width:100%; height:100%; }
+    .xterm-screen { touch-action:pan-x pinch-zoom; }
+  </style>
+</head>
+<body>
+  <main id="terminal"></main>
+  <script src="/static/js/lib/xterm-531.js"></script>
+  <script src="/static/js/terminal-touch.js"></script>
+  <script>
+    const terminal = new Terminal({scrollback:3000, allowProposedApi:true, fontSize:14});
+    terminal.open(document.getElementById('terminal'));
+    window.fixtureInput = [];
+    terminal.onData(data => fixtureInput.push({kind:'data', data}));
+    terminal.onBinary(data => fixtureInput.push({kind:'binary', data}));
+    window.fixtureTouchState = '';
+    window.fixtureTouch = WebConsoleTerminalTouch.bind(terminal, state => { fixtureTouchState = state; });
+    window.fixtureSetBuffer = type => terminal.write(type === 'alternate' ? '\x1b[?1049h' : '\x1b[?1049l');
+    window.fixtureSetMouse = mode => {
+      terminal.write('\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l');
+      const modes = {x10:'9', vt200:'1000', drag:'1002', any:'1003'};
+      if (modes[mode]) terminal.write(`\x1b[?${modes[mode]}h\x1b[?1006h`);
+    };
+    window.fixtureWriteScrollback = () => {
+      terminal.write(Array.from({length:100}, (_, index) => `fixture line ${index}`).join('\r\n'));
+      terminal.scrollToBottom();
+    };
+    window.fixtureResetInput = () => { fixtureInput.length = 0; };
+    window.fixtureReadState = () => ({
+      mode: terminal.modes.mouseTrackingMode,
+      buffer: terminal.buffer.active.type,
+      baseY: terminal.buffer.active.baseY,
+      viewportY: terminal.buffer.active.viewportY,
+      input: fixtureInput.map(item => ({...item})),
+      gesture: fixtureTouchState,
+    });
+  </script>
+</body>
+</html>

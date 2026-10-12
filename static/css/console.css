@@ -19,6 +19,8 @@
     padding: 0;
 }
 
+[hidden] { display: none !important; }
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     background: var(--bg-primary);
@@ -31,9 +33,12 @@ body.terminal-mode {
 }
 
 .terminal-app {
+    position: relative;
     display: flex;
     flex-direction: column;
     height: 100vh;
+    height: 100dvh;
+    height: var(--webconsole-visible-height, 100dvh);
     background: var(--bg-primary);
 }
 
@@ -74,7 +79,7 @@ body.terminal-mode {
 }
 
 .session-id {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     font-size: 13px;
     color: var(--text-secondary);
 }
@@ -153,7 +158,7 @@ body.terminal-mode {
 }
 
 .kbd-icon {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: -0.04em;
@@ -166,16 +171,127 @@ body.terminal-mode {
 
 /* Terminal Wrapper */
 .terminal-wrapper {
+    position: relative;
     flex: 1;
+    min-height: 0;
     background: var(--bg-terminal);
     padding: 8px;
     overflow: hidden;
+    overscroll-behavior: contain;
 }
 
 #terminal {
     height: 100%;
     width: 100%;
 }
+
+/* The persistent terminal can live inside the workspace's centre pane. */
+.embedded-terminal, .embedded-terminal .terminal-app {height: 100%; min-height: 0}
+.embedded-terminal .terminal-wrapper {padding: 0}
+.embedded-terminal #local-input-composer {display: none !important}
+.embedded-terminal-document, .embedded-terminal-document body {height: 100%; min-height: 0; overflow: hidden}
+.embedded-terminal-document .terminal-app {height: 100%; min-height: 0}
+.embedded-terminal .terminal-wrapper, .embedded-terminal #terminal {min-height: 0}
+html.embedded-terminal-document, html.embedded-terminal-document body,
+html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}
+.embedded-terminal .xterm {padding: 0}
+.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal)}
+
+/* Transfer feedback floats over the terminal so it never steals grid rows. */
+.attachment-transfer-panel {
+    position: absolute;
+    z-index: 30;
+    right: 14px;
+    bottom: 54px;
+    width: min(390px, calc(100% - 28px));
+    max-height: min(46vh, 390px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid #343d3b;
+    border-left: 2px solid var(--accent-green);
+    border-radius: 7px;
+    background: rgba(13, 17, 23, 0.97);
+    color: var(--text-primary);
+    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.46);
+    backdrop-filter: blur(12px);
+}
+
+.embedded-terminal .attachment-transfer-panel {
+    right: 12px;
+    bottom: 12px;
+    width: min(390px, calc(100% - 24px));
+}
+
+.attachment-transfer-header {
+    min-height: 39px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 10px 0 12px;
+    border-bottom: 1px solid rgba(139, 148, 158, 0.16);
+}
+
+.attachment-transfer-heading {min-width: 0; display: flex; align-items: baseline; gap: 9px}
+.attachment-transfer-heading strong {font-size: 12px; font-weight: 650}
+.attachment-transfer-heading span {overflow: hidden; color: var(--text-secondary); font-size: 10px; text-overflow: ellipsis; white-space: nowrap}
+.attachment-transfer-close {
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 17px;
+}
+.attachment-transfer-close:hover {background: rgba(255,255,255,.08); color: var(--text-primary)}
+.attachment-transfer-list {min-height: 0; overflow: auto; overscroll-behavior: contain}
+.attachment-transfer-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 7px 12px;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(139, 148, 158, 0.11);
+}
+.attachment-transfer-item:last-child {border-bottom: 0}
+.attachment-transfer-details {min-width: 0; display: grid; gap: 2px}
+.attachment-transfer-name {overflow: hidden; color: #e6edf3; font-size: 11px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap}
+.attachment-transfer-size {color: #8b949e; font-size: 9px}
+.attachment-transfer-status {overflow: hidden; color: #a9b1b8; font-size: 10px; text-overflow: ellipsis; white-space: nowrap}
+.attachment-transfer-item[data-state="uploading"] .attachment-transfer-status,
+.attachment-transfer-item[data-state="processing"] .attachment-transfer-status {color: #b7d7c9}
+.attachment-transfer-item[data-state="uploaded"] .attachment-transfer-status,
+.attachment-transfer-item[data-state="inserted"] .attachment-transfer-status {color: #8acfb3}
+.attachment-transfer-item[data-state="failed"] .attachment-transfer-status {color: #ff8b82; white-space: normal}
+.attachment-transfer-actions {display: flex; align-items: center; gap: 5px}
+.attachment-transfer-retry {
+    min-height: 25px;
+    padding: 0 8px;
+    border: 1px solid #46524c;
+    border-radius: 4px;
+    background: #1a2420;
+    color: #b9e1ca;
+    font-size: 10px;
+}
+.attachment-transfer-retry:hover:not(:disabled) {background: #24332b}
+.attachment-transfer-retry:disabled {opacity: .45; cursor: not-allowed}
+.attachment-transfer-progress {
+    grid-column: 1 / -1;
+    height: 3px;
+    overflow: hidden;
+    border-radius: 3px;
+    background: #30363d;
+}
+.attachment-transfer-progress[hidden] {display: none}
+.attachment-transfer-progress-fill {display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent-green); transition: width 120ms linear}
+.attachment-transfer-item[data-state="failed"] .attachment-transfer-progress-fill {background: var(--accent-red)}
+.attachment-transfer-item[data-state="uploaded"] .attachment-transfer-progress-fill,
+.attachment-transfer-item[data-state="inserted"] .attachment-transfer-progress-fill {background: #8acfb3}
+.attachment-transfer-panel :focus-visible {outline: 2px solid #8acfb3; outline-offset: 2px}
+@media (prefers-reduced-motion:reduce) {.attachment-transfer-progress-fill {transition: none}}
 
 /* Suggestions / Warp-style previews */
 .suggestion-panel {
@@ -214,7 +330,7 @@ body.terminal-mode {
     border-radius: 10px;
     background: rgba(255, 255, 255, 0.035);
     color: var(--text-primary);
-    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     font-size: 13px;
     text-align: left;
     cursor: pointer;
@@ -254,7 +370,7 @@ body.terminal-mode {
     background: #111827;
     border-top: 1px solid rgba(88, 166, 255, 0.35);
     color: var(--text-primary);
-    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     font-size: 13px;
     overflow: hidden;
 }
@@ -323,6 +439,46 @@ body.terminal-mode {
     padding: 8px;
 }
 
+.xterm-screen {touch-action:pan-x pinch-zoom}
+.xterm-viewport {overscroll-behavior:contain}
+
+.terminal-scroll-controls {
+    position: absolute;
+    z-index: 8;
+    right: 12px;
+    bottom: 12px;
+}
+
+.terminal-scroll-controls button {
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid #53645b;
+    border-radius: 5px;
+    background: #17231f;
+    color: #d8eee0;
+    font-size: 12px;
+    box-shadow: 0 3px 14px #0008;
+}
+
+.terminal-scroll-controls button:hover {background:#20352d}
+.terminal-scroll-hint {
+    position: absolute;
+    z-index: 7;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    width: fit-content;
+    max-width: min(560px, calc(100% - 24px));
+    padding: 7px 10px;
+    border: 1px solid #4b5147;
+    border-radius: 5px;
+    background: #121916ed;
+    color: #d5d9cc;
+    font-size: 11px;
+    line-height: 1.45;
+    pointer-events: none;
+}
+
 .xterm-viewport::-webkit-scrollbar {
     width: 10px;
 }
@@ -345,7 +501,7 @@ body.terminal-mode {
     display: flex;
     align-items: center;
     gap: 24px;
-    padding: 6px 16px;
+    padding: 6px 16px max(6px, env(safe-area-inset-bottom));
     background: var(--bg-secondary);
     border-top: 1px solid var(--border-color);
     font-size: 12px;
@@ -370,7 +526,7 @@ body.terminal-mode {
 
 .status-item .value {
     color: var(--text-primary);
-    font-family: 'JetBrains Mono', monospace;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 /* Toast */
@@ -428,17 +584,46 @@ body.terminal-mode {
 
 /* Responsive */
 @media (max-width: 600px) {
+    body.terminal-mode:not(.embedded-terminal) {
+        position: fixed;
+        top: var(--webconsole-visible-top, 0px);
+        right: 0;
+        bottom: auto;
+        left: 0;
+        width: 100%;
+        height: var(--webconsole-visible-height, 100dvh);
+    }
+
+    .terminal-header {
+        height: calc(48px + env(safe-area-inset-top));
+        min-height: calc(48px + env(safe-area-inset-top));
+        padding: calc(4px + env(safe-area-inset-top)) 8px 4px;
+    }
+
+    .header-left {min-width:0; gap:6px}
+    .back-btn {width:40px; height:40px; flex:0 0 40px}
+    .connection-badge {min-width:0; padding:4px 7px; font-size:10px; white-space:nowrap}
+    .header-actions {max-width:54vw; overflow-x:auto; gap:2px; scrollbar-width:none; touch-action:pan-x}
+    .header-actions::-webkit-scrollbar {display:none}
+    .header-actions .action-btn {width:44px; min-width:44px; height:44px}
+    .terminal-scroll-controls {right:8px; bottom:8px}
+    .terminal-scroll-controls button {min-height:44px}
+
     .status-bar {
         gap: 12px;
         font-size: 11px;
+        overflow-x: auto;
+        white-space: nowrap;
+        scrollbar-width: none;
     }
+    .status-bar::-webkit-scrollbar {display:none}
 
     .session-id {
         display: none;
     }
 
     .local-input-composer {
-        min-height: 34px;
+        min-height: 40px;
         padding: 6px 8px;
         font-size: 12px;
     }

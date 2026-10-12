@@ -1,0 +1,12 @@
+{
+  "name": "webconsole-mobile-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test --config=playwright.config.mjs",
+    "install:browser": "playwright install --only-shell chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.57.0"
+  }
+}

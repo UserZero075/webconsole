@@ -1,8 +1,7 @@
 # WebConsole
 
-**Terminal web privada para Tailscale**, con xterm.js, sesiones **tmux persistentes** y un
-**espacio de agentes** para seguir en un solo lugar a todos los agentes AI que estás
-corriendo.
+**Workspace web privado para Tailscale**: proyectos, ramas y worktrees Git, archivos y
+agentes AI en sesiones **tmux persistentes**, con comunicación entre agentes del proyecto.
 
 Se instala en un VPS, en una NAS o en tu propia máquina, se expone con Tailscale Serve y
 se usa desde **cualquier navegador** (escritorio, tablet o móvil). Sin app que instalar en
@@ -35,30 +34,20 @@ el cliente, sin cuenta, sin telemetría, sin dependencias de terceros.
 
 ## Capturas
 
-### Espacio de agentes (dashboard)
+### Lanzador de agentes
 
-![Espacio de agentes de WebConsole: tarjetas con agente, tarea, actividad reciente, avisos pendientes y previsualización de la pantalla](docs/images/dashboard-espacio-de-agentes.jpg)
+![Diálogo del lanzador de agentes de WebConsole; el nombre del workspace está oculto](docs/images/preview-lanzador-agentes.jpg)
 
-*Cada tarjeta muestra el agente, el ID de sesión, la tarea, el directorio de trabajo, la
-actividad reciente, los avisos pendientes y la pantalla actual. Con filtros por estado,
-búsqueda y ordenación "pendientes primero".*
+Fotograma del video de demostración (00:20). Los nombres del workspace y los datos del fondo
+se ocultaron antes de publicar la imagen.
 
-### Consola con un agente Codex en marcha
+### Workspace con editor, árbol de proyectos y paneles
 
-![Consola de WebConsole ejecutando Codex con salida en vivo, barra de estado con latencia y modo de entrada Live](docs/images/consola-codex.jpg)
+![Workspace WebConsole con editor CodeMirror y paneles laterales; rutas y contexto privado ocultos](docs/images/preview-workspace-editor.jpg)
 
-*Terminal real sobre tmux: herramientas a pantalla completa (Codex, OpenCode, htop, vim…),
-barra de estado con conexión, tamaño, codificación, latencia y modo de entrada.*
-
-### Sesión de OpenCode con seguimiento en directo
-
-![Sesión de OpenCode en WebConsole con el panel lateral de contexto del agente](docs/images/consola-opencode.jpg)
-
-*Misma terminal, otro agente. El dashboard y la consola se ven a la vez en pestañas
-diferentes: cada pestaña recibe la misma salida.*
-
-> Las capturas están incluidas en el repositorio (`docs/images/`) para que puedas ver el
-> programa **antes de instalar nada**.
+Fotograma del video de demostración (01:30). Se conservó el código del propio WebConsole y se
+ocultaron las rutas/contexto de sesión. Ambas vistas muestran el producto real; no son datos
+de una fixture ni prometen contenido incluido tras instalar.
 
 ---
 
@@ -83,6 +72,39 @@ WebConsole resuelve tres problemas concretos de trabajar con agentes AI en un se
 xterm.js 5.31 en el navegador. Unidades de servicio systemd con `KillMode=process` para
 que reiniciar el servidor web **no** toque los agentes.
 
+La ruta `/` abre el workspace de proyectos: navegación por proyecto/workspace/agente,
+terminal persistente en el panel central, explorador/editor de texto y estado Git. `/sessions`
+conserva el resumen de actividad anterior.
+
+### Proyectos, ramas y edición
+
+- Registra una carpeta existente; WebConsole no clona ni modifica el proyecto al registrarlo.
+- Consulta ramas locales y referencias remotas conocidas. **Actualizar ramas** ejecuta un
+  `git fetch` explícito contra el remoto seleccionado; abrir el workspace no hace llamadas de red.
+- Cada agente se inicia en el workspace elegido. También puedes crear un worktree aislado
+  desde una rama local o remota sin cambiar la rama del checkout original. Los worktrees se
+  guardan fuera del repositorio en `~/.local/share/webconsole/worktrees` por defecto.
+- El explorador permite abrir archivos de texto UTF-8 de hasta 2 MiB. El guardado comprueba
+  una revisión del contenido y avisa si otro proceso cambió el archivo. No sigue symlinks ni
+  expone `.git`, metadata de sesiones o el directorio configurado para worktrees.
+- Las sesiones nuevas de **OpenCode y Codex** iniciadas desde un proyecto reciben un servidor
+  MCP local de WebConsole, sin editar configuración global. Ofrece listar agentes del proyecto,
+  leer mensajes destinados a la sesión y enviar mensajes directos. «Leído» solo significa que
+  la herramienta entregó el mensaje al agente; no confirma que lo entendiera o ejecutara.
+- El clic derecho, `Shift+F10` y el botón `⋯` abren opciones para proyectos, workspaces y
+  sesiones. Los menús exponen acciones aplicables como abrir/seleccionar, crear agente o worktree,
+  renombrar proyecto, interrumpir y las acciones documentadas de OpenCode V2 y Codex CLI. Las
+  acciones de Codex requieren confirmación porque envían un comando a la terminal.
+- «Quitar proyecto» lo desregistra de WebConsole y conserva su carpeta. Antes hay que eliminar
+  explícitamente sus sesiones y retirar sus worktrees administrados. Eliminar una sesión activa
+  sí termina su tmux y requiere confirmación.
+- Solo se pueden retirar desde la UI los worktrees limpios creados por WebConsole, sin sesiones
+  asociadas, locks, cambios, archivos sin seguimiento ni archivos ignorados. La rama se conserva.
+  El workspace principal no se puede retirar por separado; los worktrees preexistentes se
+  detectan automáticamente y no ofrecen una acción para desvincularlos.
+- Desde el menú contextual de una sesión OpenCode puedes preparar un traspaso explícito a Codex,
+  revisar el extracto y sus advertencias, y conservar abierta la sesión original.
+
 ---
 
 ## Características
@@ -105,6 +127,98 @@ y **4 conexiones de navegador simultáneas** por sesión.
 La pantalla de tmux y su scrollback acotado se quedan en el servidor. Un navegador nuevo
 recibe la pantalla actual; el scrollback antiguo se consulta con el modo copia de tmux
 desde un attach local, no se descarga entero en cada reconexión.
+
+La vista embebida muestra una carga oscura hasta que xterm confirma el primer render. En
+reconexiones conserva la pantalla anterior y presenta el estado sin vaciar el terminal.
+Los recursos JS/CSS públicos se sirven comprimidos con gzip cuando el cliente lo acepta y usan
+versiones derivadas de su contenido para permitir caché larga sin conservar una UI antigua. La terminal
+mantiene el protocolo ANSI comprimido por bloques: WebConsole no elimina redibujados ni puede
+garantizar un volumen fijo, porque depende de lo que emita cada CLI.
+Las consultas JSON repetitivas se revalidan con `ETag` desde memoria de la pestaña; las respuestas
+siguen marcadas `no-store` y no se guardan en la caché del navegador.
+
+#### Uso táctil en móviles
+
+- En el buffer normal, un dedo desplaza el scrollback local de xterm (hasta 3000 líneas). Si estás
+  leyendo más arriba, **Volver al final** solo mueve ese buffer; la salida nueva no fuerza el salto.
+- Una TUI puede usar la pantalla alternativa, cuyo contenido no es scrollback local. Si xterm detecta
+  seguimiento de ratón con rueda (`vt200`, `drag` o `any`), el gesto vertical se convierte en eventos
+  de rueda del protocolo de ratón. La TUI decide si eso desplaza su conversación. En `x10`, sin
+  seguimiento o en modos desconocidos, WebConsole muestra el límite y no envía flechas, PageUp,
+  texto, Enter ni aprobaciones. La rueda no recupera salida que tmux ya haya descartado.
+- No se ha validado la navegación interna de OpenCode/Codex en una sesión interactiva real; por ello,
+  WebConsole no promete historial anterior dentro de esos TUI. Usa sus controles nativos cuando la
+  rueda no navegue.
+- La altura visible se actualiza con `VisualViewport` para teclado y orientación, sin reaccionar al
+  pinch zoom. El zoom del navegador sigue habilitado; los iframes ajustan la terminal solo cuando su
+  contenedor es visible y tiene dimensiones válidas.
+- Paneles móviles se abren como cajones, se cierran con Escape o tocando fuera y no enfocan la
+  terminal al abrirse. El redimensionador de la shell también admite flechas del teclado.
+
+Pruebas locales de gestos y viewport: `node --test tests/frontend/mobile/*.test.mjs`. El harness
+Playwright usa fixtures HTTP aislados, sin `app.server.py`, tmux, agentes ni sesiones reales:
+
+```sh
+npm ci --prefix tools/mobile-tests
+PLAYWRIGHT_BROWSERS_PATH=/tmp/opencode/webconsole-mobile-browsers npm --prefix tools/mobile-tests run install:browser
+PLAYWRIGHT_BROWSERS_PATH=/tmp/opencode/webconsole-mobile-browsers npm --prefix tools/mobile-tests test
+```
+
+La emulación táctil no sustituye la aceptación en Chrome/Android y Safari/iOS físicos, sobre todo
+para teclado virtual, selección prolongada y pinch zoom.
+
+#### Editor de archivos
+
+El editor usa CodeMirror 6 y sus bundles se sirven desde `static/js/lib/editor/`; no hay
+CDN ni compilación frontend al arrancar WebConsole. Los archivos Markdown abren en una
+vista previa segura con modos **Código**, **Vista previa** y **Dividida**. El HTML activo
+no se interpreta y las imágenes Markdown no se cargan; el resto de archivos usa resaltado
+por extensión con texto plano como fallback. **Atrás/Adelante** recorre archivos y puntos
+de navegación sin modificar el historial de undo/redo.
+
+Seleccionar un cambio en Git abre una comparación de solo lectura: **HEAD → índice** para
+cambios preparados e **índice → disco** para cambios no preparados. El diff no incluye el
+buffer del editor, no stagea ni revierte cambios. «Abrir código» vuelve a la pestaña editable
+sin descartar cambios locales.
+
+Solo para regenerar los bundles tras cambiar paquetes o fuentes del editor:
+
+```sh
+cd tools/editor-assets
+npm ci
+npm run build
+npm test
+```
+
+La aplicación desplegada no requiere Node. El lockfile fija dependencias y
+`static/js/lib/editor/THIRD-PARTY-NOTICES.md` incluye los avisos y licencias de los paquetes
+que forman los bundles.
+
+#### Terminal del workspace, copiar e insertar adjuntos
+
+El workspace tiene una terminal Bash independiente por workspace/worktree. Se abre al
+desplegar el cajón «Terminal» y no cambia el directorio ni la sesión de un agente existente.
+Plegar el cajón o cerrar el navegador solo desconecta su vista. Una shell finalizada no se
+reinicia sola; «Nueva terminal» crea otra explícitamente.
+
+En una terminal, **Ctrl+C** vuelve a su comportamiento nativo y envía la interrupción a la
+shell o UI del agente, aunque haya texto seleccionado. **Ctrl+Shift+C** copia la selección
+sin enviar entrada; en macOS también se conserva **Cmd+C** para copiar. El botón
+**Interrumpir** sigue disponible para enviar explícitamente el byte de interrupción.
+
+El pegado normal de texto sigue funcionando. Pegar o seleccionar imágenes, audio, vídeo o
+PDF en una sesión de agente los sube a almacenamiento privado de WebConsole y prepara una
+referencia `Archivo adjunto: /tmp/...` en el input, **sin pulsar Enter ni enviar la petición**.
+También se puede volver a insertar una referencia pendiente desde el panel. El límite es
+25 MiB por archivo, 5 por subida, 100 MiB y 50 archivos por sesión. Los archivos viven en
+`WEBCONSOLE_STATE_DIR/attachments` (directorios `0700`, archivos `0600`) y se purgan tras
+siete días si la sesión ya terminó; la ruta `/tmp/webconsole-attachments-UID/...` es un
+alias privado para que tmux y el servidor web vean los mismos bytes con `PrivateTmp`.
+
+La garantía común es subir y pegar la ruta. **Que el agente/modelo entienda una imagen,
+audio o vídeo depende de su CLI y modelo**; WebConsole no convierte ni procesa esos archivos.
+Cuando el portapapeles del navegador no exponga archivos, usa «Adjuntar». La página debe
+estar en HTTPS o localhost para las funciones de portapapeles del navegador.
 
 **Supervivencia a reinicios:** la unidad systemd incluida usa `KillMode=process`, así que
 reiniciar el servidor HTTP deja vivo al servidor tmux y a todas las herramientas, y la
@@ -168,6 +282,26 @@ rutas de NVM) y reaplica el directorio de trabajo elegido.
 | **Cualquier herramienta** | Cualquier ejecutable puede informar eventos sin peticiones de red, heredando `WEBCONSOLE_EVENT_DIR`. |
 
 Ningún lanzador habilita aprobaciones automáticas.
+
+#### Traspaso OpenCode → Codex
+
+El menú «Cambiar de agente…» requiere una conversación OpenCode enlazada por su plugin con el
+ID nativo de sesión; no adivina desde el scrollback de tmux. WebConsole comprueba que el origen
+no esté trabajando ni esperando un permiso, exporta el historial con `opencode session export
+--sanitize`, excluye razonamiento interno e instrucciones de sistema del origen y presenta una
+vista previa antes de crear Codex. Si el historial cambia entre la vista previa y la confirmación,
+se cancela esa captura. Los mensajes completos se conservan sin truncar en un paquete privado
+`WEBCONSOLE_STATE_DIR/handoffs` (`0700`/`0600`) y Codex los consulta por páginas mediante un MCP
+local configurado solo para ese proceso; un documento de continuidad identifica la última
+interacción y obliga a revisar la transcripción para distinguir petición, trabajo hecho, pendientes
+y verificaciones.
+
+La opción predeterminada **Revisar y esperar** pide a Codex presentar un resumen y esperar; la
+continuación activa es explícita y sigue sujeta a los permisos normales de Codex. Ningún resultado
+ni permiso histórico se considera una aprobación actual. Los bytes de adjuntos no se exportan;
+solo sus referencias saneadas. En esta primera versión solo está habilitado **OpenCode → Codex**;
+Hermes y los traspasos desde otros agentes no se anuncian como compatibles. El paquete se elimina
+al borrar la sesión destino.
 
 ```yaml
 # integraciones de Hermes — ajusta las rutas a tu instalación
@@ -278,53 +412,36 @@ público sin una revisión previa de autenticación y control de acceso.
 
 ## WebConsole vs Orca
 
-[Orca](https://www.onorca.dev/) (Stably AI, open source MIT, ~87.7k estrellas en octubre
-de 2026) es un **ADE** (*Agent Development Environment*): una app de escritorio (Electron,
-macOS/Windows/Linux + apps móviles) que ejecuta agentes CLI **en paralelo en git worktrees
-aislados**, con editor Monaco, visor y anotación de diffs, GitHub/Linear nativos, browser
-embebido con *Design Mode*, SSH/Cloud VMs y una capa de orquestación experimental
-(Run → Tasks con DAG → Dispatches → workers supervisados → *decision gates*).
+[Orca](https://www.onorca.dev/) y WebConsole **sí compiten**: ambos ofrecen un espacio para
+trabajar con agentes de código, cambiar entre proyectos, inspeccionar cambios y coordinar
+trabajo paralelo. La diferencia ya no es «orquestador frente a terminal»: está en el modelo
+de ejecución, el grado de automatización y dónde vive el estado.
 
-No son exactamente el mismo producto: **Orca es la consola de mando para *fabricar* con
-agentes; WebConsole es la red de seguridad para *tenerlos corriendo*** en tu máquina, a
-salvo, visibles y sin que un tercer vendor se entere.
-
-| | **WebConsole** | **Orca** |
+| Área | **WebConsole** | **Orca** |
 | --- | --- | --- |
-| Tipo | Terminal web + observación | ADE / orquestador completo |
-| Cliente | Cualquier navegador, desde cualquier dispositivo | App Electron + apps móviles |
-| Peso en el cliente | 0 (nada que instalar) | Runtime Electron de cientos de MB |
-| Persistencia de sesión | tmux a nivel de SO: sobrevive a refresco, red caída, portátil suspendido **y** reinicio del servidor web | Restauración de sesión a nivel de aplicación |
-| Orquestación (fan-out, worktrees, DAG) | No — observa y expone, no pilota | **Sí**, es su núcleo |
-| Editor, diffs, GitHub/Linear, browser | No | Sí |
-| Agentes | Cualquiera que corra en terminal; eventos nativos de Codex, OpenCode y Hermes | ~30+ agentes con integración de primera clase |
-| Telemetría | **Ninguna**, todo local en `app/sessions/*.json` | Anónima a PostHog (EE. UU.), con opt-out |
-| Cuentas / nube de terceros | Ninguna | Sin cuenta, pero con infra de emparejamiento móvil y relay |
-| Superficie auditable | ~2.800 líneas, 3 dependencias, 0 build | 13.000+ commits, toolchain Node/pnpm/Electron |
-| Instalación en el servidor | `systemctl --user enable --now webconsole.service` | `orca serve` o app de escritorio |
+| Producto | Workspace web autoalojado para proyectos, terminales y agentes | Entorno de desarrollo/orquestación de agentes de escritorio |
+| Ejecución y persistencia | Procesos CLI en tmux del servidor; las vistas web se pueden cerrar y reconectar | Sesiones y tareas administradas por Orca dentro de su entorno |
+| Proyectos y trabajo paralelo | Proyectos, workspaces, agentes y worktrees Git | Proyectos, agentes y worktrees dentro del flujo de orquestación |
+| Editor y cambios | Editor CodeMirror, vista Markdown y diffs Git de solo lectura | Editor y herramientas integradas para revisar cambios |
+| Coordinación | Mensajes entre agentes del proyecto y traspaso explícito OpenCode → Codex | Flujos de tareas y despacho de trabajo entre agentes |
+| Automatización | Control explícito por sesión; no crea un DAG de tareas automáticamente | Más énfasis en planes, tareas y coordinación supervisada |
+| Acceso | Navegador desde la red configurada por el usuario (por ejemplo, Tailscale) | Aplicación y superficies de acceso que mantiene Orca |
+| Operación y datos | Servicio propio; sesiones y archivos bajo el directorio privado configurado | Depende de la distribución, integraciones y políticas vigentes de Orca |
 
-**Cuándo elegir WebConsole**
+Las funciones y planes de Orca cambian con frecuencia; consulta su documentación para la
+matriz actual. Esta comparación describe el diseño de WebConsole y evita afirmar que una
+capacidad de Orca falta en WebConsole cuando ambas ya ofrecen una alternativa.
 
-- Necesitas que los agentes **sobrevivan a todo** en un servidor siempre encendido y
-  reengancharte desde donde estés (móvil, tablet, máquina prestada) sin instalar nada.
-- Quieres **supervisar sin cambiar tu flujo**: seguir agentes que ya lanzas a mano, sin
-  adoptar un modelo de Runs/Tasks/Dispatch ni migrar tu configuración.
-- Tu criterio es **auditar de verdad** lo que toca tus datos: 3 dependencias, cero
-  telemetría, cero cuenta, cero build.
-- Quieres **predictibilidad operativa**: una unidad systemd, sin release diario que te
-  cambie el comportamiento de una feature experimental.
+**WebConsole encaja mejor** si priorizas autoalojamiento, sesiones tmux que sobreviven a
+desconexiones y reinicios del servidor web, acceso desde un navegador y control directo sobre
+los procesos y archivos en tu máquina.
 
-**Cuándo elegir Orca (o combinarlos)**
+**Orca puede encajar mejor** si buscas que la propia aplicación gestione planes, despacho y
+coordinación más automatizada de equipos de agentes, y prefieres su entorno integrado.
 
-- Si lo que quieres es **lanzar un mismo prompt a 5 agentes en worktrees aislados y
-  fusionar el ganador**, o necesitas **editor, visor/anotación de diffs, GitHub y Linear
-  nativos, *Design Mode* o app móvil nativa**: eso es el corazón de Orca y WebConsole no
-  lo hace.
-- Si trabajas **todo el día desde un solo escritorio**, Orca rinde más.
-- **No son excluyentes:** WebConsole puede vivir debajo como capa de acceso y
-  observación permanente (sesiones que no mueren, acceso desde cualquier dispositivo vía
-  Tailscale, sin dependencias de vendor), y Orca adoptarse encima cuando necesites el
-  fan-out en worktrees.
+No son necesariamente excluyentes, pero ahora **se solapan en el mismo espacio de producto**;
+elige según el modelo operativo que quieras, no bajo la premisa de que uno solo ofrece un
+workspace, editor o soporte para worktrees.
 
 ---
 
@@ -340,7 +457,7 @@ pip install -r requirements.txt
 python app/server.py
 ```
 
-Abre `http://127.0.0.1:3030/`. La dirección de bind por defecto es *loopback*; usa
+Abre `http://127.0.0.1:3030/` y registra un proyecto. La dirección de bind por defecto es *loopback*; usa
 Tailscale Serve para HTTPS y restringe el acceso con las ACL de Tailscale.
 
 Para ejecutarlo directamente, exporta las variables de entorno antes de arrancar Python:
@@ -371,26 +488,33 @@ herramientas durante un reinicio.
 ```text
 webconsole/
 ├── app/
-│   ├── server.py            # Servidor Flask: rutas, WebSocket, seguridad, completado (609 líneas)
-│   ├── telemetry.py          # Monitor: muestreo de tmux//proc cada 2 s + ingestión de eventos (285)
-│   ├── agent_event.py        # Emisor CLI/genérico de eventos hacia el monitor (58)
-│   ├── session_shell.py      # Arranque por sesión: entorno de login, launcher del agente, env saneada (40)
-│   ├── pty_exec.py           # Cliente de terminal: TIOCSCTTY + exec de tmux attach (8)
-│   ├── tmux.conf             # Configuración de tmux aislada de la del usuario (7)
+│   ├── server.py             # Servidor Flask: API, WebSocket, seguridad y entrypoint
+│   ├── telemetry.py          # Monitor tmux/proc y eventos estructurados
+│   ├── agent_event.py        # Emisor CLI/genérico de eventos
+│   ├── projects.py           # Registro privado de proyectos y workspaces
+│   ├── git_service.py        # Ramas, estado Git y creación controlada de worktrees
+│   ├── filesystem.py         # Exploración y guardado acotado bajo una raíz
+│   ├── coordination.py       # Buzón de mensajes por proyecto
+│   ├── coordination_mcp.py   # Herramientas MCP locales para OpenCode/Codex
+│   ├── session_shell.py      # Entorno de login, launcher y MCP por sesión
+│   ├── pty_exec.py           # Cliente de terminal tmux con TIOCSCTTY
+│   ├── tmux.conf             # Configuración de tmux aislada de la del usuario
 │   └── sessions/             # Metadata privada por sesión (0600) — ignorada por git
 ├── integrations/
 │   ├── opencode.mjs          # Plugin de OpenCode: permisos, estado, mensajes, herramientas (65)
 │   └── hermes_event.py       # Adaptador de los hooks de Hermes (40)
 ├── templates/
 │   ├── index.html            # Espacio de agentes (dashboard)
-│   └── console.html          # Terminal: WS, xterm, modo Local/Live, sugerencias (797)
+│   ├── workspace.html        # Workspace integrado de proyectos y archivos
+│   └── console.html          # Terminal: WebSocket, xterm, modo Local/Live y sugerencias
 ├── static/
-│   ├── js/app.js             # Lógica del dashboard: sondeo, filtros, orden, previews (315)
+│   ├── js/app.js             # Resumen de actividad: sondeo, filtros y previews
+│   ├── js/workspace.js       # Lógica del explorador, sesiones, Git, editor y mensajes
 │   ├── js/lib/               # xterm.js y addons vendorizados + pako
 │   └── css/                  # styles.css (dashboard) y console.css (terminal)
 ├── docs/images/              # Capturas usadas en este README
 ├── deploy/webconsole.service # Unidad de systemd (KillMode=process, endurecida)
-├── tests/                    # pytest: persistencia/seguridad, telemetría, completado (526 líneas)
+├── tests/                    # pytest: persistencia, seguridad, Git, archivos y coordinación
 ├── requirements.txt          # flask, flask-sock, websockets
 ├── .env.example              # Documentación de la configuración
 └── README.md
@@ -405,6 +529,7 @@ webconsole/
 | `HOST` | `127.0.0.1` | Dirección de bind HTTP |
 | `PORT` | `3030` | Puerto HTTP |
 | `WEBCONSOLE_STATE_DIR` | `app/sessions` | Directorio privado de metadata y socket de tmux |
+| `WEBCONSOLE_WORKTREE_DIR` | `~/.local/share/webconsole/worktrees` | Destino privado para worktrees creados desde WebConsole |
 | `MAX_SESSIONS` | `32` | Límite de sesiones, incluidas las terminadas |
 | `PUBLIC_ORIGIN` | *Host* de la petición | Origen exacto permitido en el navegador |
 | `WEBCONSOLE_PASSWORD` | Sin definir | Contraseña compartida opcional |
@@ -412,16 +537,16 @@ webconsole/
 | `COOKIE_SECURE` | `0` | `1` cuando se sirve por HTTPS |
 
 Los límites de conexiones simultáneas por sesión (4) y los tamaños máximos están
-definidos en `app/server.py`.
+definidos en `app/server.py` y `app/attachments.py`. El explorador limita archivos a 2 MiB
+y entradas de directorio a 500; los mensajes entre agentes a 8 KiB.
 
 ---
 
 ## Pruebas
 
 ```bash
-. .venv/bin/activate
-pip install pytest
-python -m pytest tests -q
+.venv/bin/pip install -r requirements.txt pytest
+.venv/bin/python -m pytest tests -q
 ```
 
 Los tests de integración usan sockets de tmux aislados y un servidor HTTP/WebSocket local.
@@ -429,7 +554,10 @@ Comprueban: salida desenganchada, PID del shell preservado, recuperación de pan
 recarga de metadata, varias pestañas, revocación de URLs, protecciones de petición
 (header y Origin, token inválido, permisos de fichero, cabeceras de respuesta), autenticación
 opcional, reinicio completo del proceso HTTP conservando tmux, eventos nativos con
-fingerprint y acuse, y el autocompletado de rutas.
+fingerprint y acuse, autocompletado, persistencia de proyectos, límites del explorador,
+conflictos de guardado, inspección Git/worktrees, terminal auxiliar, permisos/propiedad y
+retención de adjuntos, registro de mensajes, autenticación MCP y preparación/confirmación
+idempotente de traspasos.
 
 ---
 
@@ -446,9 +574,16 @@ Para que la decisión de usarlo sea informada:
 - **Sin HTTPS propio**: depende de Tailscale Serve o de tu proxy.
 - **Detección de agentes basada en Linux** (`/proc`) y, para Claude Code y Aider, solo por
   nombre de proceso (sin eventos nativos).
-- **No orquesta**: no crea worktrees, no reparte prompts entre agentes ni gestiona DAGs de
-  tareas. Observa y expone; no pilota.
-- **Tests de UI como contract tests** sobre el código fuente, no tests de navegador real.
+- **No es un orquestador de tareas**: no crea DAGs, asigna tareas automáticamente, fusiona
+  ramas ni gestiona PRs de GitHub. Los worktrees y mensajes son acciones explícitas del usuario
+  y de los agentes.
+- **La compatibilidad multimedia depende de cada CLI/modelo.** WebConsole no puede garantizar
+  que un agente procese la ruta de un archivo ni leer formatos por él.
+- **Traspasos limitados a OpenCode → Codex.** OpenCode debe haber escrito su ID nativo mediante
+  el plugin de WebConsole y estar en espera; una conversación no enlazada o con permiso pendiente
+  requiere resolver ese estado primero. No se transfieren adjuntos binarios ni razonamiento privado.
+- **Tests de UI como contract tests** sobre el código fuente, no incluidos como suite de
+  navegador automatizada.
 
 ---
 

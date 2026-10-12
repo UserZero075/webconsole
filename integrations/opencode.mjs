@@ -7,6 +7,23 @@ export const WebConsolePlugin = async () => {
     if (!directory) return {};
     let queue = Promise.resolve();
     let sequence = 0;
+    let recordedSessionID = null;
+    const recordMainSession = info => {
+        if (!info || typeof info.id !== 'string' || !/^ses[A-Za-z0-9_-]{1,128}$/.test(info.id)
+                || info.parentID || recordedSessionID === info.id) return Promise.resolve();
+        const conversation = {session_id:info.id,
+            cwd:info.location?.directory || info.directory || process.cwd(), recorded_at:Date.now()};
+        queue = queue.then(async () => {
+            const parent = join(directory, '..');
+            await mkdir(parent, {recursive:true, mode:0o700});
+            const destination = join(parent, 'opencode-session.json');
+            const temporary = `${destination}.${randomUUID()}.tmp`;
+            await writeFile(temporary, JSON.stringify(conversation), {mode:0o600});
+            await rename(temporary, destination);
+            recordedSessionID = info.id;
+        }).catch(() => {});
+        return queue;
+    };
     const streamed = new Map();
     let flushTimer = null;
     const publish = event => {
@@ -35,6 +52,8 @@ export const WebConsolePlugin = async () => {
             const p = event.properties || {};
             if (['session.created', 'session.updated'].includes(event.type) && p.info?.parentID) {
                 childSessions.add(p.info.id);
+            } else if (['session.created', 'session.updated'].includes(event.type) && p.info) {
+                await recordMainSession(p.info);
             } else if (event.type === 'permission.asked') {
                 await publish({type: 'permission', message: `OpenCode solicita permiso: ${p.permission || 'revisar en la consola'}`});
             } else if (event.type === 'permission.replied') {

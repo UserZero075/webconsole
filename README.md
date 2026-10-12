@@ -36,18 +36,33 @@ el cliente, sin cuenta, sin telemetría, sin dependencias de terceros.
 
 ### Lanzador de agentes
 
-![Diálogo del lanzador de agentes de WebConsole; el nombre del workspace está oculto](docs/images/preview-lanzador-agentes.jpg)
+![Diálogo para iniciar un agente persistente y elegir OpenCode y un workspace](docs/images/preview-lanzador-agentes.png)
 
-Fotograma del video de demostración (00:20). Los nombres del workspace y los datos del fondo
-se ocultaron antes de publicar la imagen.
+El lanzador permite escoger el agente, workspace y nombre de tarea antes de iniciar la sesión.
 
-### Workspace con editor, árbol de proyectos y paneles
+### Proyectos y agente en ejecución
 
-![Workspace WebConsole con editor CodeMirror y paneles laterales; rutas y contexto privado ocultos](docs/images/preview-workspace-editor.jpg)
+![Workspace WebConsole con proyectos, workspaces y una terminal OpenCode](docs/images/preview-terminal-agente.png)
 
-Fotograma del video de demostración (01:30). Se conservó el código del propio WebConsole y se
-ocultaron las rutas/contexto de sesión. Ambas vistas muestran el producto real; no son datos
-de una fixture ni prometen contenido incluido tras instalar.
+El árbol de proyectos y workspaces convive con la sesión persistente del agente.
+
+### Agente y shell independiente
+
+![Terminal OpenCode y shell Bash independiente desplegada bajo el agente](docs/images/preview-terminal-shell.png)
+
+La shell del workspace permanece separada de la terminal del agente.
+
+### Editor Markdown
+
+![README.md abierto en el editor del workspace junto al explorador de archivos](docs/images/preview-editor-markdown.png)
+
+El editor permite trabajar con archivos del proyecto junto al explorador y los paneles del workspace.
+
+### Editor de código
+
+![Archivo JavaScript del proyecto abierto en el editor CodeMirror](docs/images/preview-editor-codigo.png)
+
+Los archivos de código se editan en el mismo espacio de trabajo que los proyectos y agentes.
 
 ---
 

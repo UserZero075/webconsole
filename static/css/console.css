@@ -186,6 +186,7 @@ body.terminal-mode {
 }
 
 /* The persistent terminal can live inside the workspace's centre pane. */
+.embedded-terminal-document {--bg-terminal: #111111}
 .embedded-terminal, .embedded-terminal .terminal-app {height: 100%; min-height: 0}
 .embedded-terminal .terminal-wrapper {padding: 0}
 .embedded-terminal #local-input-composer {display: none !important}
@@ -195,7 +196,10 @@ body.terminal-mode {
 html.embedded-terminal-document, html.embedded-terminal-document body,
 html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}
 .embedded-terminal .xterm {padding: 0}
-.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal)}
+.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal) !important}
+/* Keep scrolling, but do not reserve a column of pixels beside the TUI. */
+.embedded-terminal .xterm-viewport {scrollbar-width: none}
+.embedded-terminal .xterm-viewport::-webkit-scrollbar {width: 0; height: 0}
 
 /* Transfer feedback floats over the terminal so it never steals grid rows. */
 .attachment-transfer-panel {

@@ -112,8 +112,8 @@ a {color:inherit; text-decoration:none}
 .dirty-mark {color:var(--amber)}
 .tab-close {width:25px; height:25px; border:0; background:transparent; color:var(--quiet); border-radius:4px; font-size:15px}
 .tab-close:hover {background:#2b2d30; color:var(--text)}
-.work-surface {position:relative; min-width:0; min-height:0; flex:1; overflow:hidden; background:var(--terminal-background)}
-.work-surface iframe {display:block; width:100%; height:100%; border:0; background:var(--terminal-background)}
+.work-surface {position:relative; min-width:0; min-height:0; flex:1; overflow:hidden; background:var(--terminal-background); box-sizing:border-box}
+.work-surface iframe {position:absolute; inset:0; display:block; width:100%; height:100%; border:0; margin:0; padding:0; box-sizing:border-box; background:var(--terminal-background)}
 .terminal-loading {position:absolute; z-index:2; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; overflow:hidden; background:radial-gradient(ellipse at 50% 43%,#17231f 0,#111518 38%,#0d1013 78%); color:var(--text); text-align:center}
 .terminal-loading::before,.terminal-loading::after {position:absolute; width:min(42vw,420px); aspect-ratio:1; border:1px solid var(--accent-faint); border-radius:50%; content:""; pointer-events:none}
 .terminal-loading::after {width:min(28vw,280px); border-color:var(--accent-faint)}

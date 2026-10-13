@@ -183,19 +183,22 @@ body.terminal-mode {
 #terminal {
     height: 100%;
     width: 100%;
+    min-height: 0;
+    background: var(--bg-terminal);
 }
 
 /* The persistent terminal can live inside the workspace's centre pane. */
 .embedded-terminal, .embedded-terminal .terminal-app {height: 100%; min-height: 0}
-.embedded-terminal .terminal-wrapper {padding: 0}
+.embedded-terminal .terminal-wrapper {padding: 0; width: 100%; height: 100%; background: var(--bg-terminal)}
 .embedded-terminal #local-input-composer {display: none !important}
 .embedded-terminal-document, .embedded-terminal-document body {height: 100%; min-height: 0; overflow: hidden}
 .embedded-terminal-document .terminal-app {height: 100%; min-height: 0}
 .embedded-terminal .terminal-wrapper, .embedded-terminal #terminal {min-height: 0}
 html.embedded-terminal-document, html.embedded-terminal-document body,
 html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}
-.embedded-terminal .xterm {padding: 0}
-.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal)}
+.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal); width: 100%}
+.embedded-terminal .xterm-screen {width: 100%; height: 100%; background: var(--bg-terminal)}
+.embedded-terminal .xterm-screen canvas {max-width: none !important}
 
 /* Transfer feedback floats over the terminal so it never steals grid rows. */
 .attachment-transfer-panel {
@@ -437,6 +440,12 @@ html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .
 .xterm {
     height: 100%;
     padding: 8px;
+}
+.embedded-terminal .xterm {
+    height: calc(100% + 32px);
+    width: calc(100% + 32px);
+    margin: -16px;
+    padding: 0;
 }
 
 .xterm-screen {touch-action:pan-x pinch-zoom}

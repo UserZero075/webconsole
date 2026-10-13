@@ -747,13 +747,16 @@ def test_embedded_terminal_loader_and_resize_contracts():
     assert 'syncTerminalScrollbarWidth' in console_html
     assert 'coreViewport.scrollBarWidth = Math.max(0, viewport.offsetWidth - viewport.clientWidth)' in console_html
     assert 'https://fonts.googleapis.com' not in console_html
-    assert '.embedded-terminal .terminal-wrapper {padding: 0}' in console_css
-    assert '.embedded-terminal .xterm {padding: 0}' in console_css
-    assert '.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal)}' in console_css
+    assert '.embedded-terminal .terminal-wrapper {padding: 0; width: 100%; height: 100%; background: var(--bg-terminal)}' in console_css
+    assert '.embedded-terminal .xterm {' in console_css
+    assert 'margin: -16px' in console_css
+    assert 'height: calc(100% + 32px)' in console_css
+    assert 'width: calc(100% + 32px)' in console_css
+    assert '.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal); width: 100%}' in console_css
     assert 'html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}' in console_css
     assert 'html.embedded-terminal-document .terminal-app { display:flex; width:100%; height:100%; min-height:0; flex-direction:column; background:{{ preferences.terminal_background }}; }' in console_html
     assert '--terminal-background: #1a1a2e' in workspace_css
-    assert '.work-surface iframe {display:block; width:100%; height:100%; border:0; background:var(--terminal-background)}' in workspace_css
+    assert '.work-surface iframe {position:absolute; inset:0; display:block; width:100%; height:100%; border:0; margin:0; padding:0; box-sizing:border-box; background:var(--terminal-background)}' in workspace_css
     assert '.terminal-loading[data-state="resyncing"]' in workspace_css
     assert 'prefers-reduced-motion:reduce' in workspace_css
     assert 'id="attachment-transfer-panel"' in console_html

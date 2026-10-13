@@ -1,18 +1,18 @@
 <!DOCTYPE html>
-<html lang="es"{% if embedded %} class="embedded-terminal-document"{% endif %}>
+<html lang="es" style="--bg-terminal: {{ preferences.terminal_background }}"{% if embedded %} class="embedded-terminal-document"{% endif %}>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>Terminal - WebConsole</title>
+    <title>Terminal · {{ preferences.brand_name }}</title>
     <style>
         html, body { background:#0d1117; color:#e6edf3; }
-        html.embedded-terminal-document, html.embedded-terminal-document body { width:100%; height:100%; min-height:0; overflow:hidden; background:#1a1a2e; }
-        html.embedded-terminal-document .terminal-app { display:flex; width:100%; height:100%; min-height:0; flex-direction:column; background:#1a1a2e; }
+        html.embedded-terminal-document, html.embedded-terminal-document body { width:100%; height:100%; min-height:0; overflow:hidden; background:{{ preferences.terminal_background }}; }
+        html.embedded-terminal-document .terminal-app { display:flex; width:100%; height:100%; min-height:0; flex-direction:column; background:{{ preferences.terminal_background }}; }
         html.embedded-terminal-document .terminal-header,
         html.embedded-terminal-document #local-input-composer,
         html.embedded-terminal-document .status-bar,
         html.embedded-terminal-document .toast-container { display:none !important; }
-        html.embedded-terminal-document .terminal-wrapper { min-width:0; min-height:0; flex:1; overflow:hidden; padding:0; background:#1a1a2e; }
+        html.embedded-terminal-document .terminal-wrapper { min-width:0; min-height:0; flex:1; overflow:hidden; padding:0; background:{{ preferences.terminal_background }}; }
         html.embedded-terminal-document #terminal { width:100%; height:100%; }
     </style>
     <link rel="stylesheet" href="/static/js/lib/xterm.css?v={{ asset_version('js/lib/xterm.css') }}">
@@ -184,12 +184,12 @@
             smoothScrollDuration: 0,
             fastScrollModifier: 'alt',
             theme: {
-                background: '#1a1a2e',
+                background: '{{ preferences.terminal_background }}',
                 foreground: '#eee',
                 cursor: '#fff',
-                cursorAccent: '#1a1a2e',
+                cursorAccent: '{{ preferences.terminal_background }}',
                 selection: 'rgba(255, 255, 255, 0.3)',
-                black: '#1a1a2e',
+                black: '{{ preferences.terminal_background }}',
                 red: '#ff5370',
                 green: '#c3e88d',
                 yellow: '#ffcb6b',

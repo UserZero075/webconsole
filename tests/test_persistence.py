@@ -225,15 +225,6 @@ def test_ended_shell_is_not_restarted():
     assert server.app.test_client().get('/api/sessions').get_json()['sessions'][0]['is_active'] is False
 
 
-def test_dashboard_uses_backend_uptime_instead_of_page_load_time():
-    source = (ROOT / 'static' / 'js' / 'app.js').read_text()
-    html = (ROOT / 'templates' / 'index.html').read_text()
-    assert 'uptime_seconds' in source
-    assert 'let startTime = Date.now()' not in source
-    assert 'refreshUptime();' in source
-    assert 'defer' in html
-
-
 def test_real_http_process_restart_keeps_tmux_tool(tmp_path):
     # Start a separate HTTP process, stop it, and reopen the same URL after restart.
     with socket.socket() as listener:

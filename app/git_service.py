@@ -1,16 +1,96 @@
 """Bounded, non-interactive Git queries and explicit worktree creation."""
 import os
 import re
+import shlex
 import stat
 import subprocess
 import uuid
 from pathlib import Path
 
 from filesystem import MAX_FILE_BYTES
+from github_service import resolve_gh
 
 
 class GitError(ValueError):
     pass
+
+
+def clone_repository(url, destination, branch, timeout=120):
+    """Clone without inherited hooks/filters or interactive prompts.
+
+    GitHub CLI credentials are consulted only for this invocation. No global
+    Git configuration is written or used to execute repository filters.
+    """
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith('WEBCONSOLE_') or key in {'SECRET_KEY', 'FLASK_SECRET_KEY'}:
+            env.pop(key, None)
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='Never', GH_PROMPT_DISABLED='1')
+    command = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null',
+               '-c', 'credential.helper=']
+    gh = resolve_gh()
+    if gh:
+        command.extend(['-c', f'credential.helper=!exec {shlex.quote(gh)} auth git-credential'])
+    command.extend(['clone', '--no-recurse-submodules', '--single-branch', '--branch', branch,
+                    url, str(destination)])
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8',
+                                errors='replace', timeout=timeout, check=False, env=env)
+    except subprocess.TimeoutExpired as error:
+        raise GitError('Git tardó demasiado en clonar el repositorio.') from error
+    except OSError as error:
+        raise GitError('No se pudo ejecutar Git.') from error
+    if result.returncode:
+        raise GitError('Git no pudo clonar el repositorio con el acceso disponible.')
+    return result
+
+
+def switch_to_new_branch(directory, branch, base_ref, timeout=15):
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith('WEBCONSOLE_') or key in {'SECRET_KEY', 'FLASK_SECRET_KEY'}:
+            env.pop(key, None)
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='Never')
+    try:
+        result = subprocess.run(['git', '-C', str(directory), '-c', 'core.hooksPath=/dev/null',
+                                 '-c', 'core.attributesFile=/dev/null', 'switch', '-c', branch, base_ref],
+                                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                                timeout=timeout, check=False, env=env)
+    except subprocess.TimeoutExpired as error:
+        raise GitError('Git tardó demasiado en crear la rama local.') from error
+    except OSError as error:
+        raise GitError('No se pudo ejecutar Git.') from error
+    if result.returncode:
+        raise GitError('No se pudo crear la rama local desde la rama elegida.')
+    return result
+
+
+def push_branch(directory, branch, timeout=60):
+    """Push one current branch using gh credentials, without force or global config."""
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith('WEBCONSOLE_') or key in {'SECRET_KEY', 'FLASK_SECRET_KEY'}:
+            env.pop(key, None)
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='Never', GH_PROMPT_DISABLED='1')
+    command = ['git', '-C', str(directory), '-c', 'credential.helper=']
+    gh = resolve_gh()
+    if gh:
+        command.extend(['-c', f'credential.helper=!exec {shlex.quote(gh)} auth git-credential'])
+    command.extend(['push', 'origin', f'HEAD:refs/heads/{branch}'])
+    try:
+        result = subprocess.run(command,
+                                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                                timeout=timeout, check=False, env=env)
+    except subprocess.TimeoutExpired as error:
+        raise GitError('Git tardó demasiado en publicar la rama.') from error
+    except OSError as error:
+        raise GitError('No se pudo ejecutar Git.') from error
+    if result.returncode:
+        raise GitError('Git no pudo publicar los commits. La rama remota pudo haberse creado en la base; no se usó force push.')
+    return result
 
 
 def run_git(directory, *args, timeout=5, check=True):

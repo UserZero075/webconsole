@@ -75,10 +75,9 @@ WebConsole resuelve tres problemas concretos de trabajar con agentes AI en un se
    **tmux**, no en el navegador: recargas, te desconectas o reinicias el servidor HTTP y
    al reabrir la misma URL tienes **el mismo proceso, con el mismo PID y la misma
    pantalla**.
-2. **No ves qué están haciendo.** El **espacio de agentes** te muestra, cada pestaña
-   abierta, qué agentes corren, en qué tarea, qué han dicho recientemente, qué necesita
-   tu atención (permisos pendientes) y la pantalla actual — sin leer sus bases de datos ni
-   inyectar nada en su terminal.
+2. **No ves qué están haciendo.** El workspace muestra, en el árbol lateral, qué agentes
+   corren, en qué workspace y qué necesitan tu atención (permisos pendientes), con acceso
+   directo a su terminal — sin leer sus bases de datos ni inyectar nada en su terminal.
 3. **El acceso es incómodo.** Nada de SSH desde el móvil, VS Code Remote o port-forwarding
    manual: una URL en tu tailnet y ya está. Válida desde cualquier dispositivo y cualquier
    navegador.
@@ -88,12 +87,24 @@ xterm.js 5.31 en el navegador. Unidades de servicio systemd con `KillMode=proces
 que reiniciar el servidor web **no** toque los agentes.
 
 La ruta `/` abre el workspace de proyectos: navegación por proyecto/workspace/agente,
-terminal persistente en el panel central, explorador/editor de texto y estado Git. `/sessions`
-conserva el resumen de actividad anterior.
+terminal persistente en el panel central, explorador/editor de texto y estado Git.
 
 ### Proyectos, ramas y edición
 
-- Registra una carpeta existente; WebConsole no clona ni modifica el proyecto al registrarlo.
+- Registra una carpeta existente con un navegador de directorios del servidor, o clona un
+  repositorio de GitHub en una carpeta nueva. El navegador muestra carpetas legibles y excluye
+  el estado privado y los worktrees administrados por WebConsole.
+- Si `gh` está instalado y autenticado en el entorno del servicio, puedes buscar los repositorios
+  propios, de organizaciones y colaboraciones a los que esa cuenta tenga acceso. La cuenta es la
+  del servidor, no la del navegador; permisos de token y SSO pueden limitar los resultados. Sin
+  sesión de `gh`, puedes introducir un enlace `https://github.com/propietario/repositorio` público.
+- El clone solicita una rama y carpeta de destino nuevas. Git no sobrescribe una carpeta existente;
+  tampoco configura credenciales globales ni inicia agentes. El acceso de `gh` a la API no garantiza
+  por sí solo que Git pueda clonar un repositorio privado: se necesitan credenciales Git ya disponibles
+  o la sesión de GitHub CLI.
+- Para un repositorio propio se puede crear una rama local desde una rama existente. No se publica
+  automáticamente: **Publicar rama en GitHub** es una acción separada, requiere permisos y no
+  sobrescribe referencias remotas.
 - Consulta ramas locales y referencias remotas conocidas. **Actualizar ramas** ejecuta un
   `git fetch` explícito contra el remoto seleccionado; abrir el workspace no hace llamadas de red.
 - Cada agente se inicia en el workspace elegido. También puedes crear un worktree aislado
@@ -136,7 +147,7 @@ herramientas a pantalla completa como Codex. Varias pestañas reciben la misma s
 Las URLs y los metadatos de sesión se guardan en `app/sessions/` con permisos privados
 (directorio `0700`, JSON `0600`, escritura atómica). Un shell terminado **sigue
 terminado**: la aplicación nunca lo reemplaza en silencio por uno nuevo. Borra las
-sesiones desde el dashboard cuando termines. Los límites por defecto son **32 sesiones**
+sesiones desde el workspace cuando termines. Los límites por defecto son **32 sesiones**
 y **4 conexiones de navegador simultáneas** por sesión.
 
 La pantalla de tmux y su scrollback acotado se quedan en el servidor. Un navegador nuevo
@@ -247,17 +258,11 @@ administrador si los servicios deben sobrevivir al logout.
 > servidor antiguo y crea sesiones nuevas después de la actualización. Las URLs de la
 > versión anterior solo vivían en memoria y no se pueden restaurar.
 
-### Espacio de agentes
+### Monitoreo de agentes
 
-La portada muestra el ID de sesión, el proceso del agente o la herramienta, el nombre de
-la tarea, el directorio de trabajo, los mensajes y la actividad de herramientas recientes,
-los avisos pendientes y la pantalla actual del terminal. Incluye **búsqueda**, **filtros
-de estado** (todas / trabajando / pendientes / en espera) y **ordenación** con los
-pendientes primero. Las actualizaciones conservan el foco del teclado, los previews
-expandidos y el feed que estás leyendo. Las pestañas ocultas pausan el sondeo del
-dashboard; el servidor sigue monitorizando.
-
-El monitor muestrea tmux y los descendientes del proceso del pane **cada 2 segundos**.
+El workspace muestra, en el árbol lateral, el estado de cada sesión: proceso del agente
+o herramienta, nombre de la tarea, directorio de trabajo y avisos pendientes. Cada sesión
+tiene acceso directo a su terminal integrada. El monitor muestrea tmux y los descendientes del proceso del pane **cada 2 segundos**.
 Reconoce **Codex, OpenCode, Hermes, Claude Code y Aider**, incluidos los wrappers de
 intérprete habituales; cualquier otro proceso aparece como herramienta. No lee bases de
 datos de agentes ni inyecta entrada en el terminal. Las previsualizaciones de pantalla
@@ -365,9 +370,27 @@ bloquean esperando respuestas de red.
   enlace, Ctrl+L y confirmación antes de matar una sesión.
 - El historial de comandos solo vive en el `sessionStorage` de la pestaña.
 
+### Personalización
+
+El botón **Personalizar** en la barra superior abre un panel para ajustar la apariencia
+global de WebConsole:
+
+- **Nombre de la aplicación**: se muestra en el brand, el título de la pestaña y las
+  etiquetas aria. Se escapa como texto plano; no se interpreta HTML.
+- **Color de acento**: selector RGB con tres canales (sliders + campos numéricos), un
+  selector nativo y ocho círculos predefinidos. Se aplica a botones, foco, pestañas
+  activas y estados del workspace y de la terminal.
+- **Fondo de la terminal**: mismo selector RGB. Se propaga al workspace, al iframe de la
+  terminal y al tema de xterm al recargar.
+
+Los valores se previsualizan en vivo y se guardan con `PUT /api/preferences`. El servidor
+los valida (`#rrggbb`, nombre de 1–80 caracteres sin caracteres de control) y los persiste
+en `WEBCONSOLE_STATE_DIR/preferences.json` (`0600`). Cada petición mutada exige
+`X-WebConsole: 1` y un Origin coincidente.
+
 ### Seguridad
 
-Este es un servicio de terminal **single-user**. Cualquiera con acceso al dashboard puede
+Este es un servicio de terminal **single-user**. Cualquiera con acceso al workspace puede
 crear shells, ver los enlaces de sesión y borrar sesiones, con los permisos de SO de la
 cuenta de servicio: usa una cuenta desprivilegiada y dedicada. **Tailscale solo no es
 aislamiento individual de sesiones.**
@@ -507,6 +530,9 @@ webconsole/
 │   ├── telemetry.py          # Monitor tmux/proc y eventos estructurados
 │   ├── agent_event.py        # Emisor CLI/genérico de eventos
 │   ├── projects.py           # Registro privado de proyectos y workspaces
+│   ├── github_service.py     # Estado gh, repositorios y ramas accesibles
+│   ├── host_directories.py   # Navegación segura del filesystem del servidor
+│   ├── preferences.py        # Preferencias globales de apariencia (nombre, colores)
 │   ├── git_service.py        # Ramas, estado Git y creación controlada de worktrees
 │   ├── filesystem.py         # Exploración y guardado acotado bajo una raíz
 │   ├── coordination.py       # Buzón de mensajes por proyecto
@@ -519,17 +545,17 @@ webconsole/
 │   ├── opencode.mjs          # Plugin de OpenCode: permisos, estado, mensajes, herramientas (65)
 │   └── hermes_event.py       # Adaptador de los hooks de Hermes (40)
 ├── templates/
-│   ├── index.html            # Espacio de agentes (dashboard)
 │   ├── workspace.html        # Workspace integrado de proyectos y archivos
 │   └── console.html          # Terminal: WebSocket, xterm, modo Local/Live y sugerencias
 ├── static/
-│   ├── js/app.js             # Resumen de actividad: sondeo, filtros y previews
-│   ├── js/workspace.js       # Lógica del explorador, sesiones, Git, editor y mensajes
+│   ├── js/workspace.js       # Lógica del explorador, sesiones, Git, editor, mensajes y personalización
 │   ├── js/lib/               # xterm.js y addons vendorizados + pako
-│   └── css/                  # styles.css (dashboard) y console.css (terminal)
+│   └── css/                  # workspace.css y console.css
 ├── docs/images/              # Capturas usadas en este README
 ├── deploy/webconsole.service # Unidad de systemd (KillMode=process, endurecida)
-├── tests/                    # pytest: persistencia, seguridad, Git, archivos y coordinación
+├── tests/                    # pytest: persistencia, seguridad, Git, archivos, preferencias e importación
+├── PLAN.md                   # Plan de implementación
+├── tasks/                    # Tareas del plan
 ├── requirements.txt          # flask, flask-sock, websockets
 ├── .env.example              # Documentación de la configuración
 └── README.md
@@ -581,7 +607,7 @@ idempotente de traspasos.
 Para que la decisión de usarlo sea informada:
 
 - **Single-user, sin RBAC ni auditoría.** No hay registro de quién ejecutó qué; quien
-  tiene acceso al dashboard ve los previews y puede borrar sesiones.
+  tiene acceso al workspace ve los previews y puede borrar sesiones.
 - **Servidor único y estado en memoria.** La actividad en vivo se pierde al reiniciar el
   servidor (los avisos persisten). No hay réplicas ni HA.
 - **Sin protección por fuerza bruta** en la contraseña opcional (sí hay límites de tamaño

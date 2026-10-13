@@ -659,7 +659,7 @@ def test_workspace_routes_render_embed_policy_and_register_projects(tmp_path, mo
     assert page.status_code == 200 and b'project-tree' in page.data
     assert page.headers['Cache-Control'] == 'no-store'
     assert b'/static/js/workspace.js?v=' in page.data
-    assert client.get('/sessions').status_code == 200
+    assert client.get('/sessions').status_code == 404
     embedded = client.get('/c/' + 't' * 43 + '?embed=1')
     assert embedded.status_code == 200
     assert embedded.headers['X-Frame-Options'] == 'SAMEORIGIN'
@@ -751,9 +751,9 @@ def test_embedded_terminal_loader_and_resize_contracts():
     assert '.embedded-terminal .xterm {padding: 0}' in console_css
     assert '.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal)}' in console_css
     assert 'html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}' in console_css
-    assert 'html.embedded-terminal-document .terminal-app { display:flex; width:100%; height:100%; min-height:0; flex-direction:column; background:#1a1a2e; }' in console_html
-    assert '--terminal-canvas: #1a1a2e' in workspace_css
-    assert '.work-surface iframe {display:block; width:100%; height:100%; border:0; background:var(--terminal-canvas)}' in workspace_css
+    assert 'html.embedded-terminal-document .terminal-app { display:flex; width:100%; height:100%; min-height:0; flex-direction:column; background:{{ preferences.terminal_background }}; }' in console_html
+    assert '--terminal-background: #1a1a2e' in workspace_css
+    assert '.work-surface iframe {display:block; width:100%; height:100%; border:0; background:var(--terminal-background)}' in workspace_css
     assert '.terminal-loading[data-state="resyncing"]' in workspace_css
     assert 'prefers-reduced-motion:reduce' in workspace_css
     assert 'id="attachment-transfer-panel"' in console_html

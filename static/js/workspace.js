@@ -12,6 +12,10 @@ const state = {
     handoff: null,
     contextMenuTrigger: null, confirmResolver: null, renameProjectId: null, mobileDrawerTrigger: null,
     terminalFrameReady: false, terminalLoadTimer: null,
+    projectSource: 'folder', directoryTarget: 'folder', directoryPath: '',
+    directoryEntries: [],
+    githubStatus: null, githubRepo: null, githubBranch: '', githubRepos: [],
+    preferences: null,
 };
 const launcherNames = {opencode: 'OpenCode', codex: 'Codex', hermes: 'Hermes', terminal: 'Terminal'};
 let currentEditorView = null;
@@ -22,6 +26,7 @@ let navigationHistory = null;
 let navigationTimer = null;
 let restoringNavigation = false;
 let markdownTimer = null;
+let githubSearchTimer = null;
 const editorBundlePromises = new Map();
 const terminalFrameResizeTimers = new WeakMap();
 
@@ -49,10 +54,14 @@ function ensureEditorBundle(name) {
 
 async function api(url, options = {}) {
     const method = (options.method || 'GET').toUpperCase();
-    const cached = method === 'GET' ? apiResponseCache.get(url) : null;
+    const useCache = options.cache !== false;
+    if (method === 'GET' && !useCache) apiResponseCache.delete(url);
+    const fetchOptions = {...options};
+    delete fetchOptions.cache;
+    const cached = method === 'GET' && useCache ? apiResponseCache.get(url) : null;
     const headers = {'X-WebConsole': '1', ...options.headers};
     if (cached?.etag && !headers['If-None-Match']) headers['If-None-Match'] = cached.etag;
-    const response = await fetch(url, {...options, headers});
+    const response = await fetch(url, {...fetchOptions, headers});
     if (response.status === 304 && cached) {
         const observedAt = Number(response.headers.get('X-WebConsole-Observed-At'));
         if (Number.isFinite(observedAt) && Array.isArray(cached.data.sessions)) {
@@ -68,11 +77,11 @@ async function api(url, options = {}) {
         error.data = data;
         throw error;
     }
-    if (method === 'GET') {
+    if (method === 'GET' && useCache) {
         const etag = response.headers.get('ETag');
         if (etag) apiResponseCache.set(url, {etag, data});
         else apiResponseCache.delete(url);
-    } else {
+    } else if (method !== 'GET') {
         // Mutations can affect more than one cached collection; refresh them
         // from the next response rather than trying to guess dependencies.
         apiResponseCache.clear();
@@ -87,6 +96,12 @@ function node(tag, className, value) {
     if (className) element.className = className;
     if (value !== undefined) element.textContent = value;
     return element;
+}
+function debounce(callback, delay) {
+    return (...args) => {
+        clearTimeout(githubSearchTimer);
+        githubSearchTimer = setTimeout(() => callback(...args), delay);
+    };
 }
 function toast(message) {
     const item = node('div', 'toast', message);
@@ -1862,28 +1877,444 @@ async function sendMessage(event) {
     finally { button.disabled = false; }
 }
 
+const PREF_ACCENT_PRESETS = ['#8acfb3', '#e18b83', '#9dbde0', '#d8b873', '#c792ea', '#89ddff', '#e6edf3', '#3fb950'];
+const PREF_TERMINAL_PRESETS = ['#1a1a2e', '#0d1117', '#161b22', '#101113', '#141b2d', '#211c28', '#1c1e26', '#0b0f14'];
+
+function hexToRgb(hex) {
+    const clean = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex.slice(1) : '000000';
+    return {
+        r: parseInt(clean.slice(0, 2), 16),
+        g: parseInt(clean.slice(2, 4), 16),
+        b: parseInt(clean.slice(4, 6), 16),
+    };
+}
+
+function rgbToHex(r, g, b) {
+    const channel = value => Math.max(0, Math.min(255, Math.round(Number(value) || 0))).toString(16).padStart(2, '0');
+    return `#${channel(r)}${channel(g)}${channel(b)}`;
+}
+
+function hexToRgba(hex, alpha) {
+    const {r, g, b} = hexToRgb(hex);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function applyThemeVariables(theme) {
+    const root = document.documentElement;
+    root.style.setProperty('--accent', theme.accent_color);
+    root.style.setProperty('--accent-soft', hexToRgba(theme.accent_color, 0.14));
+    root.style.setProperty('--accent-faint', hexToRgba(theme.accent_color, 0.06));
+    root.style.setProperty('--terminal-background', theme.terminal_background);
+    const brand = document.querySelector('.brand-name');
+    if (brand) brand.textContent = theme.brand_name;
+    const title = document.querySelector('title');
+    if (title) title.textContent = `Workspace · ${theme.brand_name}`;
+}
+
+function buildPresetRow(hostId, colorKey) {
+    const host = $(hostId);
+    host.replaceChildren();
+    const presets = colorKey === 'accent' ? PREF_ACCENT_PRESETS : PREF_TERMINAL_PRESETS;
+    for (const hex of presets) {
+        const button = node('button', 'preset-circle');
+        button.type = 'button';
+        button.style.background = hex;
+        button.setAttribute('aria-label', `Usar ${hex}`);
+        button.title = hex;
+        button.dataset.hex = hex;
+        button.dataset.color = colorKey;
+        button.addEventListener('click', () => setPreferenceColor(colorKey, hex));
+        host.append(button);
+    }
+}
+
+function syncPreferenceColorControls(colorKey, hex) {
+    const {r, g, b} = hexToRgb(hex);
+    const values = {r, g, b};
+    document.querySelectorAll(`[data-color="${colorKey}"][data-channel]`).forEach(input => {
+        const channel = input.dataset.channel;
+        input.value = values[channel];
+    });
+    const swatch = $(colorKey === 'accent' ? 'accent-swatch' : 'terminal-swatch');
+    if (swatch) swatch.style.background = hex;
+    const code = $(colorKey === 'accent' ? 'accent-hex' : 'terminal-hex');
+    if (code) code.textContent = hex;
+    const native = $(colorKey === 'accent' ? 'accent-native' : 'terminal-native');
+    if (native) native.value = hex;
+    document.querySelectorAll(`#preset-row .preset-circle[data-color="${colorKey}"], .preset-row .preset-circle[data-color="${colorKey}"]`)
+        .forEach(button => {
+            const selected = button.dataset.hex.toLowerCase() === hex.toLowerCase();
+            button.classList.toggle('selected', selected);
+            button.setAttribute('aria-pressed', String(selected));
+        });
+}
+
+function setPreferenceColor(colorKey, hex) {
+    if (!state.preferences) return;
+    state.preferences[colorKey === 'accent' ? 'accent_color' : 'terminal_background'] = hex.toLowerCase();
+    syncPreferenceColorControls(colorKey, hex.toLowerCase());
+    applyThemeVariables(state.preferences);
+}
+
+function setPreferenceChannel(colorKey, channel, rawValue) {
+    if (!state.preferences) return;
+    const field = colorKey === 'accent' ? 'accent_color' : 'terminal_background';
+    const current = hexToRgb(state.preferences[field]);
+    current[channel] = Math.max(0, Math.min(255, Math.round(Number(rawValue) || 0)));
+    setPreferenceColor(colorKey, rgbToHex(current.r, current.g, current.b));
+}
+
+function populatePreferencesDialog() {
+    const prefs = state.preferences;
+    if (!prefs) return;
+    $('pref-brand').value = prefs.brand_name;
+    syncPreferenceColorControls('accent', prefs.accent_color);
+    syncPreferenceColorControls('terminal', prefs.terminal_background);
+}
+
+function openPreferencesDialog() {
+    $('preferences-error').hidden = true;
+    buildPresetRow('accent-presets', 'accent');
+    buildPresetRow('terminal-presets', 'terminal');
+    populatePreferencesDialog();
+    $('preferences-dialog').showModal();
+    $('pref-brand').focus();
+}
+
+async function savePreferences(event) {
+    event.preventDefault();
+    const button = $('save-preferences');
+    button.disabled = true;
+    $('preferences-error').hidden = true;
+    try {
+        const data = await api('/api/preferences', jsonOptions('PUT', {
+            brand_name: $('pref-brand').value,
+            accent_color: state.preferences.accent_color,
+            terminal_background: state.preferences.terminal_background,
+        }));
+        state.preferences = data;
+        applyThemeVariables(data);
+        $('preferences-dialog').close();
+        toast('Apariencia guardada.');
+    } catch (error) {
+        $('preferences-error').hidden = false;
+        $('preferences-error').textContent = error.message;
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function wirePreferencesEvents() {
+    $('open-preferences').addEventListener('click', openPreferencesDialog);
+    $('preferences-form').addEventListener('submit', savePreferences);
+    document.querySelectorAll('#preferences-dialog [data-color][data-channel]').forEach(input => {
+        const handler = () => setPreferenceChannel(input.dataset.color, input.dataset.channel, input.value);
+        input.addEventListener('input', handler);
+        input.addEventListener('change', handler);
+    });
+    [['accent-native', 'accent'], ['terminal-native', 'terminal']].forEach(([id, colorKey]) => {
+        $(id).addEventListener('input', event => setPreferenceColor(colorKey, event.target.value));
+    });
+    $('pref-brand').addEventListener('input', event => {
+        if (!state.preferences) return;
+        state.preferences.brand_name = event.target.value;
+        applyThemeVariables(state.preferences);
+    });
+}
+
+async function loadPreferences() {
+    try {
+        const data = await api('/api/preferences');
+        state.preferences = data;
+        applyThemeVariables(data);
+    } catch (_) {
+        // The template already rendered safe defaults; the dialog stays usable.
+    }
+}
+
 function openProjectDialog() {
     $('project-error').hidden = true;
+    $('project-form').reset();
+    $('project-folder-panel').hidden = false;
+    $('project-github-panel').hidden = true;
+    $('project-directory-picker').hidden = true;
+    $('project-dialog-actions').hidden = false;
+    $('save-project').hidden = false;
+    $('clone-project').hidden = true;
+    $('github-publish').hidden = true;
+    $('github-selected').hidden = true;
+    $('github-branch-label').hidden = true;
+    $('github-repositories').replaceChildren();
+    $('github-repositories').hidden = true;
+    $('github-search-label').hidden = true;
+    $('github-url-label').hidden = true;
+    $('github-load-url').hidden = true;
+    $('github-destination-label').hidden = true;
+    $('github-folder-label').hidden = true;
+    $('new-branch-panel').hidden = true;
+    $('github-new-branch-label').hidden = true;
+    $('github-create-branch').checked = false;
+    state.projectSource = 'folder';
+    state.githubRepo = null;
+    state.githubStatus = null;
     $('project-dialog').showModal();
     $('project-form').elements.path.focus();
 }
+
+function setProjectSource(source) {
+    state.projectSource = source;
+    const github = source === 'github';
+    $('project-folder-panel').hidden = github;
+    $('project-github-panel').hidden = !github;
+    $('project-folder-tab').classList.toggle('active', !github);
+    $('project-github-tab').classList.toggle('active', github);
+    $('project-folder-tab').setAttribute('aria-selected', String(!github));
+    $('project-github-tab').setAttribute('aria-selected', String(github));
+    $('save-project').hidden = github;
+    $('clone-project').hidden = !github || !state.githubRepo || !$('github-parent').value || !$('github-branch').value;
+    $('project-error').hidden = true;
+    if (github && !state.githubStatus) loadGitHubStatus();
+}
+
+async function loadGitHubStatus() {
+    $('github-status').textContent = 'Comprobando GitHub en el servidor…';
+    try {
+        state.githubStatus = await api('/api/github/status', {cache:false});
+        const gitWarning = state.githubStatus.git_available ? '' : ' Git no está instalado; no se podrán clonar repositorios.';
+        $('github-status').textContent = (state.githubStatus.authenticated
+            ? `Conectado como ${state.githubStatus.login}. Se mostrarán repositorios propios, de organizaciones y colaboraciones accesibles para esta cuenta.`
+            : state.githubStatus.message) + gitWarning;
+        $('github-search-label').hidden = !state.githubStatus.authenticated;
+        $('github-url-label').hidden = false;
+        $('github-load-url').hidden = false;
+        if (state.githubStatus.authenticated) await loadGitHubRepositories();
+    } catch (error) {
+        $('github-status').textContent = `${error.message} También puedes introducir el enlace de un repositorio público.`;
+        $('github-url-label').hidden = false;
+    }
+}
+
+async function loadGitHubRepositories() {
+    if (!state.githubStatus?.authenticated) return;
+    const query = $('github-search').value.trim();
+    $('github-repositories').hidden = false;
+    $('github-repositories').replaceChildren(node('div', 'directory-empty', 'Cargando repositorios…'));
+    try {
+        const data = await api(`/api/github/repositories?q=${encodeURIComponent(query)}`, {cache:false});
+        state.githubRepos = data.repositories || [];
+        const host = $('github-repositories');
+        host.replaceChildren();
+        for (const repo of state.githubRepos) {
+            const button = node('button', 'github-repository');
+            button.type = 'button';
+            button.setAttribute('aria-pressed', String(state.githubRepo?.full_name === repo.full_name));
+            const title = node('strong', '', repo.full_name);
+            const visibility = node('small', repo.visibility === 'private' ? 'repo-private' : '', repo.visibility === 'private' ? 'Privado' : 'Público');
+            button.append(title, visibility);
+            button.addEventListener('click', () => selectGitHubRepository(repo));
+            host.append(button);
+        }
+        if (!state.githubRepos.length) host.append(node('div', 'directory-empty', 'No hay repositorios que coincidan.'));
+        if (data.truncated) host.append(node('div', 'directory-empty', 'Se muestran hasta 500 repositorios. Usa la búsqueda para acotar.'));
+    } catch (error) {
+        $('github-repositories').replaceChildren(node('div', 'directory-empty', error.message));
+    }
+}
+
+async function selectGitHubRepository(repo) {
+    state.githubRepo = repo;
+    state.githubBranch = '';
+    $('github-selected').textContent = `${repo.full_name} · ${repo.visibility}${repo.archived ? ' · archivado' : ''}`;
+    $('github-selected').hidden = false;
+    $('github-repositories').querySelectorAll('.github-repository').forEach(button =>
+        button.setAttribute('aria-pressed', String(button.querySelector('strong')?.textContent === repo.full_name)));
+    $('github-branch-label').hidden = false;
+    $('github-branch').replaceChildren(new Option('Cargando ramas…', ''));
+    $('new-branch-panel').hidden = !repo.owned || repo.archived;
+    $('github-parent').value ||= '';
+    $('github-destination-label').hidden = false;
+    $('github-folder-label').hidden = false;
+    $('github-folder').value = repo.name;
+    $('clone-project').hidden = true;
+    try {
+        const data = await api(`/api/github/branches?repo=${encodeURIComponent(repo.full_name)}&authenticated=1`, {cache:false});
+        fillGitHubBranches(data.branches || [], repo.default_branch);
+    } catch (error) {
+        $('github-branch').replaceChildren(new Option(error.message, ''));
+    }
+}
+
+function fillGitHubBranches(branches, defaultBranch = '') {
+    const select = $('github-branch');
+    select.replaceChildren(...branches.map(branch => new Option(branch, branch)));
+    if (!branches.length) {
+        select.append(new Option('No hay ramas disponibles', ''));
+        select.disabled = true;
+    } else {
+        select.disabled = false;
+        select.value = branches.includes(defaultBranch) ? defaultBranch : branches[0];
+    }
+    updateCloneAvailability();
+}
+
+async function loadPublicRepositoryBranches() {
+    const input = $('github-url').value.trim();
+    $('project-error').hidden = true;
+    const match = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(input);
+    if (!match) { showProjectError('Usa un enlace https://github.com/propietario/repositorio.'); return; }
+    const repoName = `${match[1]}/${match[2]}`;
+    state.githubRepo = {full_name:repoName, name:match[2], owner:match[1], owned:false, visibility:'public', default_branch:''};
+    $('github-selected').textContent = `${repoName} · repositorio público por URL`;
+    $('github-selected').hidden = false;
+    $('github-branch-label').hidden = false;
+    $('github-branch').replaceChildren(new Option('Consultando ramas…', ''));
+    $('github-branch').disabled = true;
+    $('github-destination-label').hidden = false;
+    $('github-folder-label').hidden = false;
+    $('github-folder').value = match[2];
+    $('new-branch-panel').hidden = true;
+    $('clone-project').hidden = true;
+    try {
+        const data = await api(`/api/github/branches?repo=${encodeURIComponent(repoName)}`, {cache:false});
+        fillGitHubBranches(data.branches || []);
+    } catch (error) { showProjectError(error.message); }
+}
+
+function showProjectError(message) {
+    $('project-error').textContent = message;
+    $('project-error').hidden = false;
+}
+
+function updateCloneAvailability() {
+    const has = state.projectSource === 'github' && state.githubStatus?.git_available !== false
+        && state.githubRepo && $('github-parent').value
+        && $('github-folder').value.trim() && $('github-branch').value;
+    $('clone-project').hidden = !has || Boolean($('github-create-branch').checked && !$('github-new-branch').value.trim());
+}
+
+async function openDirectoryPicker(target) {
+    state.directoryTarget = target;
+    state.directoryPath = target === 'folder' ? ($('project-form').elements.path.value || '') : ($('github-parent').value || '');
+    $('project-folder-panel').hidden = true;
+    $('project-github-panel').hidden = true;
+    $('project-dialog-actions').hidden = true;
+    $('project-directory-picker').hidden = false;
+    try {
+        const data = await api('/api/host-directories', {cache:false});
+        if (!state.directoryPath) state.directoryPath = data.path;
+        await navigateDirectories(state.directoryPath);
+    } catch (error) { showProjectError(error.message); }
+}
+
+async function navigateDirectories(path) {
+    const data = await api(`/api/host-directories?path=${encodeURIComponent(path)}`, {cache:false});
+    state.directoryPath = data.path;
+    state.directoryEntries = data.directories || [];
+    $('directory-filter').value = '';
+    $('directory-path').value = data.path;
+    $('directory-selection-path').textContent = data.path;
+    $('directory-up').disabled = !data.parent;
+    const crumbs = $('directory-breadcrumbs');
+    crumbs.replaceChildren();
+    const pieces = data.path.split('/').filter(Boolean);
+    let prefix = '/';
+    const root = node('button', '', '/'); root.type = 'button';
+    root.addEventListener('click', () => navigateDirectories('/').catch(error => showProjectError(error.message)));
+    crumbs.append(root);
+    for (const piece of pieces) {
+        prefix = `${prefix.replace(/\/$/, '')}/${piece}`;
+        const current = prefix;
+        const item = node('button', '', piece); item.type = 'button';
+        item.addEventListener('click', () => navigateDirectories(current).catch(error => showProjectError(error.message)));
+        crumbs.append(item);
+    }
+    renderDirectoryEntries(data.truncated);
+}
+
+function renderDirectoryEntries(truncated = false) {
+    const list = $('directory-list'); list.replaceChildren();
+    const query = $('directory-filter').value.trim().toLocaleLowerCase();
+    const visible = state.directoryEntries.filter(item => item.name.toLocaleLowerCase().includes(query));
+    if (!visible.length) list.append(node('div', 'directory-empty', query ? 'No hay carpetas que coincidan.' : 'No hay subcarpetas legibles aquí.'));
+    for (const item of visible) {
+        const button = node('button', 'directory-entry', item.name); button.type = 'button'; button.setAttribute('role', 'option');
+        button.addEventListener('click', () => navigateDirectories(item.path).catch(error => showProjectError(error.message)));
+        list.append(button);
+    }
+    if (truncated) list.append(node('div', 'directory-empty', 'Se muestran las primeras 200 carpetas.'));
+}
+
+function closeDirectoryPicker(select = false) {
+    if (select) {
+        if (state.directoryTarget === 'folder') $('project-form').elements.path.value = state.directoryPath;
+        else $('github-parent').value = state.directoryPath;
+    }
+    $('project-directory-picker').hidden = true;
+    $('project-folder-panel').hidden = state.projectSource !== 'folder';
+    $('project-github-panel').hidden = state.projectSource !== 'github';
+    $('project-dialog-actions').hidden = false;
+    updateCloneAvailability();
+}
+
 async function createProject(event) {
     event.preventDefault();
     const form = $('project-form');
     const button = $('save-project'); button.disabled = true; $('project-error').hidden = true;
     try {
         const data = await api('/api/projects', jsonOptions('POST', Object.fromEntries(new FormData(form))));
+        await adoptCreatedProject(data.project);
         $('project-dialog').close(); form.reset();
-        state.selectedProjectId = data.project.id; state.workspaceData = null; state.selectedWorkspaceId = null;
-        state.projects = [...state.projects, {...data.project, workspace_count:1, session_count:0}];
-        try {
-            const sessionData = await api('/api/sessions');
-            state.sessions = sessionData.sessions || [];
-        } catch (_) {}
-        renderTree();
-        await loadWorkspaces(data.project.id);
         toast('Proyecto registrado; no se modificaron sus archivos.');
-    } catch (error) { $('project-error').hidden = false; $('project-error').textContent = error.message; }
+    } catch (error) { showProjectError(error.message); }
+    finally { button.disabled = false; }
+}
+
+async function adoptCreatedProject(project) {
+    state.selectedProjectId = project.id; state.workspaceData = null; state.selectedWorkspaceId = null;
+    state.projects = [...state.projects.filter(item => item.id !== project.id), {...project, workspace_count:1, session_count:0}];
+    try { const sessionData = await api('/api/sessions'); state.sessions = sessionData.sessions || []; } catch (_) {}
+    renderTree();
+    await loadWorkspaces(project.id);
+}
+
+async function cloneProject() {
+    const button = $('clone-project');
+    button.disabled = true; $('project-error').hidden = true;
+    const repo = state.githubRepo;
+    const payload = {parent:$('github-parent').value, folder:$('github-folder').value.trim(), branch:$('github-branch').value,
+        repo:repo?.full_name, url:$('github-url').value.trim() || `https://github.com/${repo?.full_name}`,
+        new_branch:$('github-create-branch').checked ? $('github-new-branch').value.trim() : ''};
+    try {
+        const data = await api('/api/projects/clone', jsonOptions('POST', payload));
+        await adoptCreatedProject(data.project);
+        if (payload.new_branch) {
+            $('github-publish-copy').textContent = `Rama ${data.branch} creada solo en local. No se ha enviado a GitHub.`;
+            $('github-publish').hidden = false;
+            $('publish-github-branch').dataset.path = data.project.path;
+            $('publish-github-branch').dataset.repo = repo.full_name;
+            $('publish-github-branch').dataset.branch = data.branch;
+            $('publish-github-branch').dataset.baseBranch = payload.branch;
+            $('clone-project').hidden = true;
+            toast('Proyecto clonado y registrado; la rama nueva sigue solo en local.');
+        } else {
+            $('project-dialog').close();
+            toast('Proyecto clonado y registrado.');
+        }
+    } catch (error) { showProjectError(error.message); }
+    finally { button.disabled = false; }
+}
+
+async function publishGitHubBranch() {
+    const button = $('publish-github-branch'); button.disabled = true;
+    try {
+        await api('/api/projects/publish-branch', jsonOptions('POST', {
+            path:button.dataset.path, repo:button.dataset.repo, branch:button.dataset.branch,
+            base_branch:button.dataset.baseBranch,
+        }));
+        $('github-publish-copy').textContent = `Rama ${button.dataset.branch} publicada en GitHub.`;
+        button.hidden = true;
+        toast('Rama publicada en GitHub.');
+    } catch (error) { showProjectError(error.message); }
     finally { button.disabled = false; }
 }
 
@@ -2377,6 +2808,34 @@ function attachEvents() {
     $('project-search').addEventListener('input', renderTree);
     $('file-search').addEventListener('input', renderFileTree);
     $('project-form').addEventListener('submit', createProject);
+    wirePreferencesEvents();
+    $('project-folder-tab').addEventListener('click', () => setProjectSource('folder'));
+    $('project-github-tab').addEventListener('click', () => setProjectSource('github'));
+    $('browse-project-path').addEventListener('click', () => openDirectoryPicker('folder'));
+    $('browse-clone-parent').addEventListener('click', () => openDirectoryPicker('clone'));
+    $('directory-close').addEventListener('click', () => closeDirectoryPicker(false));
+    $('directory-select').addEventListener('click', () => closeDirectoryPicker(true));
+    $('directory-up').addEventListener('click', () => {
+        const parent = $('directory-path').value.replace(/\/$/, '').split('/').slice(0, -1).join('/') || '/';
+        navigateDirectories(parent).catch(error => showProjectError(error.message));
+    });
+    $('directory-path').addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); navigateDirectories(event.currentTarget.value).catch(error => showProjectError(error.message)); }
+    });
+    $('directory-filter').addEventListener('input', () => renderDirectoryEntries());
+    $('github-search').addEventListener('input', debounce(() => loadGitHubRepositories(), 250));
+    $('github-load-url').addEventListener('click', loadPublicRepositoryBranches);
+    $('github-url').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); loadPublicRepositoryBranches(); } });
+    $('github-branch').addEventListener('change', updateCloneAvailability);
+    $('github-folder').addEventListener('input', updateCloneAvailability);
+    $('github-create-branch').addEventListener('change', () => {
+        $('github-new-branch-label').hidden = !$('github-create-branch').checked;
+        updateCloneAvailability();
+    });
+    $('github-new-branch').addEventListener('input', updateCloneAvailability);
+    $('github-parent').addEventListener('input', updateCloneAvailability);
+    $('clone-project').addEventListener('click', cloneProject);
+    $('publish-github-branch').addEventListener('click', publishGitHubBranch);
     $('agent-form').addEventListener('submit', createAgent);
     $('handoff-prepare').addEventListener('click', prepareAgentHandoff);
     $('handoff-confirm').addEventListener('click', confirmAgentHandoff);
@@ -2499,5 +2958,6 @@ function attachEvents() {
 
 document.addEventListener('DOMContentLoaded', () => {
     attachEvents();
+    loadPreferences();
     refreshAll();
 });

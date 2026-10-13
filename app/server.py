@@ -36,12 +36,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from telemetry import Telemetry
 from projects import ProjectError, ProjectStore
-from git_service import (GitError, create_worktree, fetch as git_fetch, inspect as inspect_git,
-                         read_diff as read_git_diff, remove_worktree as git_remove_worktree)
+from git_service import (GitError, create_worktree, fetch as git_fetch, inspect as inspect_git, run_git,
+                         read_diff as read_git_diff, remove_worktree as git_remove_worktree,
+                         clone_repository, switch_to_new_branch, push_branch)
 from filesystem import FileAccessError, WorkspaceFiles, MAX_FILE_BYTES
 from coordination import CoordinationError, CoordinationStore, new_coordination_token
 from attachments import AttachmentError, AttachmentStore, MAX_REQUEST_BYTES as MAX_ATTACHMENT_REQUEST_BYTES
 from handoffs import HandoffError, HandoffStore, MAX_EXPORT_BYTES as MAX_HANDOFF_EXPORT_BYTES, NATIVE_SESSION_ID, normalize_opencode_export
+from host_directories import DirectoryError, list_directories, resolve_directory
+from github_service import (GitHubError, status as github_status, repositories as github_repositories,
+                            branches as github_branches, validate_public_url,
+                            repository_permission, resolve_gh)
+from preferences import PreferencesError, PreferencesStore, DEFAULTS as PREFERENCE_DEFAULTS
 
 app = Flask(__name__,
             static_folder=str(Path(__file__).parent.parent / 'static'),
@@ -105,6 +111,16 @@ COORDINATION_STORE = CoordinationStore(TERMINAL_SESSIONS_DIR)
 WORKTREE_DIR = Path(os.environ.get('WEBCONSOLE_WORKTREE_DIR', str(Path.home() / '.local' / 'share' / 'webconsole' / 'worktrees'))).expanduser().resolve()
 ATTACHMENT_STORE = AttachmentStore(TERMINAL_SESSIONS_DIR)
 HANDOFF_STORE = HandoffStore(TERMINAL_SESSIONS_DIR)
+PREFERENCES_STORE = PreferencesStore(TERMINAL_SESSIONS_DIR)
+
+
+def current_preferences():
+    """Read preferences, falling back to safe defaults if the private file is corrupt."""
+    try:
+        return PREFERENCES_STORE.get()
+    except PreferencesError:
+        app.logger.warning('Unable to read appearance preferences; using defaults.')
+        return dict(PREFERENCE_DEFAULTS)
 
 
 def generate_token():
@@ -301,7 +317,7 @@ def security_headers(response):
     embedded_console = request.path.startswith('/c/') and request.args.get('embed') == '1'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN' if embedded_console else 'DENY'
     response.headers['Content-Security-Policy'] = "frame-ancestors 'self'; object-src 'none'; base-uri 'self'" if embedded_console else "frame-ancestors 'none'; object-src 'none'; base-uri 'self'"
-    if (request.method == 'GET' and request.path in {'/', '/sessions'} and response.status_code == 200
+    if (request.method == 'GET' and request.path == '/' and response.status_code == 200
             and client_accepts_gzip()):
         response.direct_passthrough = False
         response.set_data(gzip.compress(response.get_data(), compresslevel=6, mtime=0))
@@ -675,12 +691,19 @@ def terminal_ws(ws, session_id):
 # Routes
 @app.route('/')
 def index():
-    return render_template('workspace.html')
+    return render_template('workspace.html', preferences=current_preferences())
 
 
-@app.route('/sessions')
-def sessions_dashboard():
-    return render_template('index.html')
+@app.route('/api/preferences', methods=['GET', 'PUT'])
+def api_preferences():
+    if request.method == 'GET':
+        return jsonify(current_preferences())
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(PREFERENCES_STORE.update(payload))
+    except PreferencesError as error:
+        return jsonify({'error': str(error)}), 400
+
 
 @app.route('/c/<token>')
 def console(token):
@@ -693,7 +716,8 @@ def console(token):
                              session_role=info.get('session_role', 'agent'),
                              embedded=request.args.get('embed') == '1',
                              cols=info.get('cols', 120),
-                             rows=info.get('rows', 30))
+                             rows=info.get('rows', 30),
+                             preferences=current_preferences())
     abort(404, description='Session not found. Create a new session from the dashboard.')
 
 def session_snapshot():
@@ -1428,11 +1452,169 @@ def api_projects():
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         abort(400)
+    if not isinstance(payload.get('path'), str) or not payload['path'].strip():
+        return jsonify({'error': 'Indica una ruta de carpeta válida.'}), 400
     try:
-        project = PROJECT_STORE.add(payload.get('path'), payload.get('name', ''))
-    except ProjectError as error:
+        selected_path = resolve_directory(payload.get('path'), excluded=(TERMINAL_SESSIONS_DIR, WORKTREE_DIR,
+                                                                          ATTACHMENT_STORE.root, HANDOFF_STORE.root))
+        project = PROJECT_STORE.add(str(selected_path), payload.get('name', ''))
+    except (ProjectError, DirectoryError) as error:
         return jsonify({'error': str(error)}), 400
     return jsonify({'project': {'id': project['id'], 'name': project['name'], 'path': project['path']}}), 201
+
+
+@app.get('/api/host-directories')
+def api_host_directories():
+    path = request.args.get('path') or None
+    try:
+        return jsonify(list_directories(path, excluded=(TERMINAL_SESSIONS_DIR, WORKTREE_DIR,
+                                                         ATTACHMENT_STORE.root, HANDOFF_STORE.root)))
+    except DirectoryError as error:
+        return jsonify({'error': str(error)}), 400
+
+
+@app.get('/api/github/status')
+def api_github_status():
+    return jsonify(github_status())
+
+
+@app.get('/api/github/repositories')
+def api_github_repositories():
+    try:
+        return jsonify(github_repositories(request.args.get('q', '')))
+    except GitHubError as error:
+        return jsonify({'error': str(error)}), 400
+
+
+@app.get('/api/github/branches')
+def api_github_branches():
+    try:
+        return jsonify(github_branches(request.args.get('repo', ''), request.args.get('authenticated') == '1'))
+    except GitHubError as error:
+        return jsonify({'error': str(error)}), 400
+
+
+@app.post('/api/projects/clone')
+def api_clone_project():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        abort(400)
+    parent, folder, branch = payload.get('parent'), payload.get('folder'), payload.get('branch')
+    source_url, full_name = payload.get('url'), payload.get('repo')
+    if not isinstance(parent, str) or not isinstance(folder, str) or not isinstance(branch, str):
+        return jsonify({'error': 'Indica carpeta de destino, nombre y rama.'}), 400
+    if (not folder or len(folder) > 100 or folder in {'.', '..'}
+            or any(char in folder for char in '/\\\x00\r\n')):
+        return jsonify({'error': 'El nombre de la carpeta no es válido.'}), 400
+    if not branch or len(branch) > 250 or any(char in branch for char in '\x00\r\n'):
+        return jsonify({'error': 'Selecciona una rama válida.'}), 400
+    try:
+        if full_name:
+            if not isinstance(full_name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', full_name):
+                raise GitHubError('Selecciona un repositorio válido.')
+            source_url = f'https://github.com/{full_name}.git'
+        normalized_url, normalized_name = validate_public_url(source_url)
+        if full_name and normalized_name.casefold() != full_name.casefold():
+            raise GitHubError('El repositorio seleccionado no coincide con el enlace.')
+        if not shutil.which('git'):
+            raise GitHubError('Git no está instalado en el servidor.')
+        parent_path = resolve_directory(parent, excluded=(TERMINAL_SESSIONS_DIR, WORKTREE_DIR,
+                                                          ATTACHMENT_STORE.root, HANDOFF_STORE.root))
+        if run_git(parent_path, 'check-ref-format', '--branch', branch, check=False).returncode:
+            raise GitHubError('La rama seleccionada no es válida para Git.')
+        requested_branch = payload.get('new_branch', '')
+        if requested_branch:
+            if (not isinstance(requested_branch, str) or not full_name or len(requested_branch) > 200
+                    or any(char in requested_branch for char in '\x00\r\n')):
+                raise GitHubError('La rama nueva requiere un repositorio de la cuenta autenticada.')
+            permission = repository_permission(full_name)
+            current = github_status()
+            if not permission['owned'] or not current['authenticated']:
+                raise GitHubError('Solo puedes crear una rama para un repositorio propio con gh autenticado.')
+            new_branch = requested_branch
+            if len(new_branch) > 200 or run_git(parent_path, 'check-ref-format', '--branch', new_branch, check=False).returncode:
+                raise GitHubError('El nombre de la rama nueva no es válido para Git.')
+        else:
+            new_branch = ''
+        destination = parent_path / folder
+        if destination.exists() or destination.is_symlink():
+            raise GitHubError('Ya existe una carpeta con ese nombre. Elige otro destino.')
+        # mkdir reserves the exact user-selected destination atomically. Git only
+        # writes into this new directory; no existing checkout is touched.
+        destination.mkdir(mode=0o700)
+        try:
+            clone_repository(normalized_url, destination, branch, timeout=120)
+            if new_branch:
+                switch_to_new_branch(destination, new_branch, f'origin/{branch}', timeout=15)
+        except GitError as error:
+            # Keep the newly-created directory for explicit recovery; never
+            # recursively delete a path whose ownership may have changed.
+            raise GitHubError('No se pudo completar el clone. Revisa la conectividad o el acceso Git; la carpeta reservada puede contener un clone incompleto.') from error
+        try:
+            project = PROJECT_STORE.add(str(destination), folder)
+        except ProjectError as error:
+            raise GitHubError(f'El clone quedó en {destination}, pero no se pudo registrar: {error}') from error
+        return jsonify({'project': {'id': project['id'], 'name': project['name'], 'path': project['path']},
+                        'branch': new_branch or branch, 'published': False}), 201
+    except (GitHubError, GitError, DirectoryError, OSError) as error:
+        return jsonify({'error': str(error)}), 400
+
+
+@app.post('/api/projects/publish-branch')
+def api_publish_project_branch():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        abort(400)
+    project_path, repo, branch, base_branch = (payload.get('path'), payload.get('repo'),
+                                               payload.get('branch'), payload.get('base_branch'))
+    if not all(isinstance(value, str) for value in (project_path, repo, branch, base_branch)):
+        abort(400)
+    if (len(project_path) > 4096 or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo)
+            or len(branch) > 200 or len(base_branch) > 200
+            or any(char in branch + base_branch for char in '\x00\r\n')):
+        return jsonify({'error': 'El proyecto, repositorio o rama no es válido.'}), 400
+    try:
+        permission = repository_permission(repo)
+        if not permission['owned'] or not permission['push']:
+            raise GitHubError('Solo se pueden publicar ramas en repositorios propios con permiso de escritura.')
+        project_root = Path(project_path).resolve(strict=True)
+        project = next((item for item in PROJECT_STORE.list() if item['path'] == str(project_root)), None)
+        if not project:
+            raise GitHubError('El proyecto ya no está registrado.')
+        branch_check = run_git(project_root, 'check-ref-format', '--branch', branch, check=False)
+        base_check = run_git(project_root, 'check-ref-format', '--branch', base_branch, check=False)
+        current = run_git(project_root, 'branch', '--show-current').stdout.strip()
+        if branch_check.returncode or base_check.returncode or current != branch:
+            raise GitHubError('La rama local seleccionada cambió. Actualiza el proyecto antes de publicar.')
+        remote = run_git(project_root, 'remote', 'get-url', 'origin').stdout.strip()
+        _, expected_repo = validate_public_url(f'https://github.com/{repo}')
+        _, actual_repo = validate_public_url(remote)
+        if actual_repo.casefold() != expected_repo.casefold():
+            raise GitHubError('El remoto origin ya no coincide con el repositorio seleccionado.')
+        base_ref = f'refs/remotes/origin/{base_branch}'
+        base_commit = run_git(project_root, 'rev-parse', '--verify', f'{base_ref}^{{commit}}', check=False)
+        if base_commit.returncode:
+            raise GitHubError('No se encontró la rama base remota. No se creó ninguna referencia.')
+        gh = resolve_gh()
+        if not gh:
+            raise GitHubError('GitHub CLI (gh) no está disponible para publicar la rama.')
+        owner, name = repo.split('/', 1)
+        # GitHub's create-ref endpoint is conditional: an existing remote ref
+        # fails instead of being advanced by a racing push.
+        result = subprocess.run([gh, 'api', '--method', 'POST',
+                                 f'/repos/{owner}/{name}/git/refs',
+                                 '-f', f'ref=refs/heads/{branch}', '-f', f'sha={base_commit.stdout.strip()}'],
+                                capture_output=True, text=True, timeout=20, check=False,
+                                env={**{key:value for key,value in os.environ.items()
+                                        if not key.startswith('WEBCONSOLE_') and key not in {'SECRET_KEY','FLASK_SECRET_KEY'}},
+                                     'GH_PROMPT_DISABLED':'1'})
+        if result.returncode:
+            raise GitHubError('GitHub no pudo crear la rama. Puede existir ya o faltar permisos; no se sobrescribió.')
+        push_branch(project_root, branch)
+        run_git(project_root, 'branch', '--set-upstream-to', f'origin/{branch}', branch, check=False)
+        return jsonify({'published': True, 'branch': branch})
+    except (GitHubError, GitError, DirectoryError, OSError, subprocess.TimeoutExpired) as error:
+        return jsonify({'error': str(error) if isinstance(error, GitHubError) else 'No se pudo publicar la rama. Revisa el acceso Git y vuelve a comprobar el remoto.'}), 400
 
 
 @app.route('/api/projects/<project_id>', methods=['PATCH', 'DELETE'])

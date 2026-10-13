@@ -8,9 +8,9 @@
 - Persistence tests use real tmux and local HTTP/WebSocket servers. UI tests currently inspect source; there is no lint/typecheck or frontend build pipeline.
 
 ## Architecture and invariants
-- `/` is the project workspace; `/sessions` is the activity summary; `/c/<token>` is the standalone terminal. `app/server.py` is the entrypoint and starts telemetry only when run directly.
+- `/` is the project workspace; `/c/<token>` is the standalone terminal. `app/server.py` is the entrypoint and starts telemetry only when run directly.
 - Project/Git/filesystem/message services live in `app/projects.py`, `app/git_service.py`, `app/filesystem.py`, and `app/coordination.py`. `app/coordination_mcp.py` exposes project-scoped messages to OpenCode/Codex sessions launched from a workspace; launchers use per-session MCP configuration, not global config edits.
-- Terminal code is inline in `templates/console.html`; workspace code is vanilla JS in `static/js/workspace.js`; dashboard code is `static/js/app.js`; `static/js/lib/` is vendored. No frontend build step is configured.
+- Terminal code is inline in `templates/console.html`; workspace code is vanilla JS in `static/js/workspace.js`; `static/js/lib/` is vendored. No frontend build step is configured.
 - tmux owns persistent shells. Disconnecting or closing a browser view must not kill a session; ended shells must not restart silently. Preserve `KillMode=process` in systemd or restarts kill agents.
 - Session state defaults to `app/sessions` (override with `WEBCONSOLE_STATE_DIR`); importing `server.py` creates/chmods it and loads metadata. Private directories are `0700`, metadata/event files `0600`.
 - Session URLs are bearer credentials. Mutations require `X-WebConsole: 1`; supplied Origins must match; WebSocket attachment requires both a matching Origin and session token.

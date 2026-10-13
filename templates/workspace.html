@@ -4,18 +4,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="color-scheme" content="dark">
-    <title>Workspace · WebConsole</title>
+    <title>Workspace · {{ preferences.brand_name }}</title>
     <link rel="stylesheet" href="/static/css/workspace.css?v={{ asset_version('css/workspace.css') }}">
+    <style>
+        :root {
+            --accent: {{ preferences.accent_color }};
+            --terminal-background: {{ preferences.terminal_background }};
+        }
+    </style>
 </head>
 <body>
     <header class="topbar">
-        <a class="brand" href="/" aria-label="WebConsole, workspace"><span class="brand-mark">w</span><span>WebConsole</span></a>
+        <a class="brand" href="/" aria-label="{{ preferences.brand_name }}, workspace"><span class="brand-mark">w</span><span class="brand-name">{{ preferences.brand_name }}</span></a>
         <div class="top-separator"></div>
         <div class="top-context"><span id="top-project">Sin proyecto seleccionado</span><span id="top-workspace"></span></div>
         <div class="top-actions">
             <button class="mobile-nav-button" id="toggle-projects" type="button" aria-label="Mostrar proyectos" aria-controls="project-sidebar" aria-expanded="false">Proyectos</button>
             <button class="mobile-nav-button" id="toggle-inspector" type="button" aria-label="Mostrar archivos" aria-controls="inspector" aria-expanded="false">Archivos</button>
-            <a class="quiet-link" href="/sessions">Resumen</a>
+            <button class="top-button" id="open-preferences" aria-label="Personalizar la apariencia" title="Personalizar"><span aria-hidden="true">⚙</span><span class="top-button-label">Personalizar</span></button>
             <button class="top-button" id="add-project" aria-label="Añadir proyecto" title="Añadir proyecto"><span aria-hidden="true">＋</span><span class="top-button-label">Proyecto</span></button>
             <button class="top-button primary" id="add-agent" aria-label="Crear agente" title="Crear agente" disabled><span aria-hidden="true">＋</span><span class="top-button-label">Agente</span></button>
         </div>
@@ -27,7 +33,6 @@
             <div class="sidebar-heading"><span>Proyectos</span><button class="mini-button" id="refresh-all" title="Actualizar workspace" aria-label="Actualizar workspace">↻</button></div>
             <label class="project-search"><span aria-hidden="true">⌕</span><input id="project-search" type="search" placeholder="Buscar proyecto o agente" autocomplete="off"></label>
             <div class="project-tree" id="project-tree" aria-live="polite"><div class="sidebar-loading">Cargando proyectos…</div></div>
-            <div class="sidebar-bottom"><a href="/sessions">Ver actividad de todas las sesiones</a></div>
         </aside>
 
         <section class="center-pane" aria-label="Área de trabajo">
@@ -139,11 +144,41 @@
 
     <dialog id="project-dialog" class="form-dialog">
         <form id="project-form">
-            <div class="dialog-kicker">Nuevo proyecto</div><h2>Registra una carpeta</h2><p>WebConsole leerá su estado Git y abrirá archivos únicamente dentro de sus workspaces.</p>
-            <label>Ruta absoluta<input name="path" required maxlength="4096" placeholder="/home/usuario/proyectos/app" autocomplete="off"></label>
-            <label>Nombre <span>opcional</span><input name="name" maxlength="100" placeholder="El nombre de la carpeta se usa por defecto"></label>
+            <div class="dialog-kicker">Nuevo proyecto</div><h2>Añade un proyecto</h2><p>Selecciona una carpeta del servidor o clona un repositorio de GitHub.</p>
+            <div class="project-source-tabs" role="tablist" aria-label="Origen del proyecto">
+                <button type="button" class="project-source-tab active" id="project-folder-tab" role="tab" aria-selected="true">Carpeta existente</button>
+                <button type="button" class="project-source-tab" id="project-github-tab" role="tab" aria-selected="false">GitHub</button>
+            </div>
+            <section id="project-folder-panel" role="tabpanel" aria-labelledby="project-folder-tab">
+                <label>Carpeta del servidor<div class="path-input-row"><input name="path" required maxlength="4096" placeholder="Elige una carpeta" autocomplete="off"><button type="button" class="top-button" id="browse-project-path">Explorar</button></div></label>
+                <label>Nombre <span>opcional</span><input name="name" maxlength="100" placeholder="Se usa el nombre de la carpeta"></label>
+            </section>
+            <section id="project-github-panel" role="tabpanel" aria-labelledby="project-github-tab" hidden>
+                <div class="github-status" id="github-status" role="status">Comprueba GitHub para ver los repositorios disponibles.</div>
+                <label id="github-search-label" hidden>Repositorios accesibles<input id="github-search" type="search" maxlength="100" placeholder="Buscar por propietario o nombre" autocomplete="off"></label>
+                <div class="github-repository-list" id="github-repositories" hidden></div>
+                <label id="github-url-label" hidden>Enlace de un repositorio público<input id="github-url" type="url" maxlength="500" placeholder="https://github.com/propietario/repositorio" autocomplete="url"></label>
+                <button type="button" class="text-button github-load-url" id="github-load-url" hidden>Consultar ramas del enlace</button>
+                <div class="github-selected" id="github-selected" hidden></div>
+                <label id="github-branch-label" hidden>Rama que se clonará<select id="github-branch"></select></label>
+                <div class="new-branch-panel" id="new-branch-panel" hidden>
+                    <label class="check-row"><input id="github-create-branch" type="checkbox"> Crear una rama local a partir de otra</label>
+                    <label id="github-new-branch-label" hidden>Nombre de la nueva rama<input id="github-new-branch" maxlength="200" placeholder="feature/nueva-tarea" autocomplete="off"></label>
+                </div>
+                <label id="github-destination-label" hidden>Carpeta donde se clonará<div class="path-input-row"><input id="github-parent" readonly placeholder="Elige una carpeta de destino"><button type="button" class="top-button" id="browse-clone-parent">Explorar</button></div></label>
+                <label id="github-folder-label" hidden>Nombre de la carpeta<input id="github-folder" maxlength="100" placeholder="Se sugiere el nombre del repositorio" autocomplete="off"></label>
+                <div class="github-publish" id="github-publish" hidden><span id="github-publish-copy"></span><button type="button" class="top-button" id="publish-github-branch">Publicar rama en GitHub</button></div>
+            </section>
+            <section class="directory-picker" id="project-directory-picker" hidden aria-label="Navegador de carpetas">
+                <div class="directory-picker-heading"><button type="button" class="mini-button" id="directory-up" aria-label="Subir un nivel">↑</button><strong>Carpetas del servidor</strong><button type="button" class="mini-button" id="directory-close" aria-label="Cerrar navegador">×</button></div>
+                <label class="directory-path-label">Ruta<input id="directory-path" autocomplete="off" spellcheck="false"></label>
+                <label class="directory-filter-label">Filtrar subcarpetas<input id="directory-filter" type="search" placeholder="Nombre de carpeta" autocomplete="off"></label>
+                <div class="directory-breadcrumbs" id="directory-breadcrumbs" aria-label="Ruta actual"></div>
+                <div class="directory-list" id="directory-list" role="listbox" aria-label="Subcarpetas"></div>
+                <div class="directory-picker-footer"><span id="directory-selection-path"></span><button type="button" class="top-button primary" id="directory-select">Seleccionar carpeta</button></div>
+            </section>
             <div class="dialog-error" id="project-error" hidden></div>
-            <div class="dialog-actions"><button type="button" class="text-button" data-close="project-dialog">Cancelar</button><button class="top-button primary" type="submit" id="save-project">Registrar proyecto</button></div>
+            <div class="dialog-actions" id="project-dialog-actions"><button type="button" class="text-button" data-close="project-dialog">Cancelar</button><button class="top-button primary" type="submit" id="save-project">Registrar proyecto</button><button type="button" class="top-button primary" id="clone-project" hidden>Clonar y registrar</button></div>
         </form>
     </dialog>
 
@@ -208,6 +243,39 @@
             <label>Nombre<input id="rename-project-name" name="name" required maxlength="100" autocomplete="off"></label>
             <div class="dialog-error" id="rename-project-error" hidden></div>
             <div class="dialog-actions"><button type="button" class="text-button" data-close="rename-project-dialog">Cancelar</button><button class="top-button primary" id="save-project-name" type="submit">Guardar nombre</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="preferences-dialog" class="form-dialog preferences-dialog" aria-labelledby="preferences-title">
+        <form id="preferences-form">
+            <div class="dialog-kicker">Personalización</div><h2 id="preferences-title">Apariencia</h2><p>Estos valores se aplican a todo WebConsole: workspace y terminales.</p>
+
+            <label>Nombre de la aplicación<input id="pref-brand" name="brand_name" required maxlength="80" autocomplete="off" placeholder="WebConsole"></label>
+
+            <fieldset class="color-fieldset">
+                <legend>Color de acento</legend>
+                <div class="color-current"><span class="color-swatch" id="accent-swatch" aria-hidden="true"></span><code id="accent-hex">#8acfb3</code><input type="color" id="accent-native" aria-label="Selector nativo del color de acento"></div>
+                <div class="rgb-channels">
+                    <label class="rgb-channel"><span>R</span><input type="range" min="0" max="255" value="138" data-color="accent" data-channel="r" aria-label="Rojo del acento"><input type="number" min="0" max="255" value="138" data-color="accent" data-channel="r" aria-label="Valor rojo del acento"></label>
+                    <label class="rgb-channel"><span>G</span><input type="range" min="0" max="255" value="207" data-color="accent" data-channel="g" aria-label="Verde del acento"><input type="number" min="0" max="255" value="207" data-color="accent" data-channel="g" aria-label="Valor verde del acento"></label>
+                    <label class="rgb-channel"><span>B</span><input type="range" min="0" max="255" value="179" data-color="accent" data-channel="b" aria-label="Azul del acento"><input type="number" min="0" max="255" value="179" data-color="accent" data-channel="b" aria-label="Valor azul del acento"></label>
+                </div>
+                <div class="preset-row" role="group" aria-label="Colores de acento predefinidos" id="accent-presets"></div>
+            </fieldset>
+
+            <fieldset class="color-fieldset">
+                <legend>Fondo de la terminal</legend>
+                <div class="color-current"><span class="color-swatch" id="terminal-swatch" aria-hidden="true"></span><code id="terminal-hex">#1a1a2e</code><input type="color" id="terminal-native" aria-label="Selector nativo del fondo de la terminal"></div>
+                <div class="rgb-channels">
+                    <label class="rgb-channel"><span>R</span><input type="range" min="0" max="255" value="26" data-color="terminal" data-channel="r" aria-label="Rojo del fondo"><input type="number" min="0" max="255" value="26" data-color="terminal" data-channel="r" aria-label="Valor rojo del fondo"></label>
+                    <label class="rgb-channel"><span>G</span><input type="range" min="0" max="255" value="26" data-color="terminal" data-channel="g" aria-label="Verde del fondo"><input type="number" min="0" max="255" value="26" data-color="terminal" data-channel="g" aria-label="Valor verde del fondo"></label>
+                    <label class="rgb-channel"><span>B</span><input type="range" min="0" max="255" value="46" data-color="terminal" data-channel="b" aria-label="Azul del fondo"><input type="number" min="0" max="255" value="46" data-color="terminal" data-channel="b" aria-label="Valor azul del fondo"></label>
+                </div>
+                <div class="preset-row" role="group" aria-label="Fondos de terminal predefinidos" id="terminal-presets"></div>
+            </fieldset>
+
+            <div class="dialog-error" id="preferences-error" hidden></div>
+            <div class="dialog-actions"><button type="button" class="text-button" data-close="preferences-dialog">Cancelar</button><button class="top-button primary" type="submit" id="save-preferences">Guardar apariencia</button></div>
         </form>
     </dialog>
 

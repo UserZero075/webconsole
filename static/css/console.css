@@ -196,9 +196,12 @@ body.terminal-mode {
 .embedded-terminal .terminal-wrapper, .embedded-terminal #terminal {min-height: 0}
 html.embedded-terminal-document, html.embedded-terminal-document body,
 html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}
-.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal); width: 100%}
+.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal) !important; width: 100%}
 .embedded-terminal .xterm-screen {width: 100%; height: 100%; background: var(--bg-terminal)}
 .embedded-terminal .xterm-screen canvas {max-width: none !important}
+/* Keep scrolling, but do not reserve a column of pixels beside the TUI. */
+.embedded-terminal .xterm-viewport {scrollbar-width: none}
+.embedded-terminal .xterm-viewport::-webkit-scrollbar {width: 0; height: 0}
 
 /* Transfer feedback floats over the terminal so it never steals grid rows. */
 .attachment-transfer-panel {

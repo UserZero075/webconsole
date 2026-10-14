@@ -752,11 +752,16 @@ def test_embedded_terminal_loader_and_resize_contracts():
     assert 'margin: -16px' in console_css
     assert 'height: calc(100% + 32px)' in console_css
     assert 'width: calc(100% + 32px)' in console_css
-    assert '.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal); width: 100%}' in console_css
+    assert '.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal) !important; width: 100%}' in console_css
+    assert '.embedded-terminal .xterm-viewport {scrollbar-width: none}' in console_css
+    assert '.embedded-terminal .xterm-viewport::-webkit-scrollbar {width: 0; height: 0}' in console_css
     assert 'html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}' in console_css
     assert 'html.embedded-terminal-document .terminal-app { display:flex; width:100%; height:100%; min-height:0; flex-direction:column; background:{{ preferences.terminal_background }}; }' in console_html
     assert '--terminal-background: #1a1a2e' in workspace_css
-    assert '.work-surface iframe {position:absolute; inset:0; display:block; width:100%; height:100%; border:0; margin:0; padding:0; box-sizing:border-box; background:var(--terminal-background)}' in workspace_css
+    assert '.work-surface {position:relative; min-width:0; min-height:0; flex:1 1 0; overflow:hidden; background:var(--terminal-background); box-sizing:border-box}' in workspace_css
+    assert '.work-surface iframe {position:absolute; inset:0; display:block; width:100%; height:100%; min-width:0; min-height:0; border:0; margin:0; padding:0; box-sizing:border-box; background:var(--terminal-background)}' in workspace_css
+    assert '.workspace-terminal {height:35px; flex:0 0 35px; min-height:0; display:flex; flex-direction:column; overflow:hidden; background:#151618}' in workspace_css
+    assert '.inspector {display:flex; flex-direction:column; background:#17181a}' in workspace_css
     assert '.terminal-loading[data-state="resyncing"]' in workspace_css
     assert 'prefers-reduced-motion:reduce' in workspace_css
     assert 'id="attachment-transfer-panel"' in console_html

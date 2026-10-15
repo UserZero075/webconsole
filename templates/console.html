@@ -741,7 +741,11 @@
                 // iframe's own document state, which browsers report inconsistently.
                 parentViewVisible = Boolean(event.data.visible);
                 if (parentViewVisible) resumeView();
-                else scheduleSuspend();
+                else if (event.data.immediate) {
+                    clearTimeout(suspendTimer);
+                    suspendTimer = null;
+                    suspendView('hidden');
+                } else scheduleSuspend();
                 return;
             }
             if (event.data?.type === 'webconsole:session-state' && event.data.session_id === sessionId) {

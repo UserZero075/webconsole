@@ -5,18 +5,21 @@ const state = {
     projects: [], sessions: [], workspaceData: null, selectedProjectId: null,
     selectedWorkspaceId: null, selectedSessionId: null, tabs: [], activeTabId: null,
     expandedProjects: new Set(), expandedWorkspaces: new Set(), directoryCache: new Map(),
+    workspacesByProject: new Map(), workspaceLoads: new Map(), projectsLoaded: false,
+    terminalViews: new Map(),
     fileGeneration: 0, frameSessionId: null, pendingAction: null, actionTimer: null,
-    pollTimer: null, busy: false, messages: [], shellFrameSessionId: null,
+    pollTimer: null, busy: false, messages: [], shellFrameSessionId: null, nextInventoryRefreshAt: 0,
     terminalPrefsWorkspaceId: null, terminalExpanded: false, terminalHeight: 230, terminalAppliedHeight: 230,
     pendingAttachments: [],
     handoff: null,
     contextMenuTrigger: null, confirmResolver: null, renameProjectId: null, mobileDrawerTrigger: null,
-    terminalFrameReady: false, terminalLoadTimer: null,
+    terminalFrameReady: false,
     projectSource: 'folder', directoryTarget: 'folder', directoryPath: '',
     directoryEntries: [],
     githubStatus: null, githubRepo: null, githubBranch: '', githubRepos: [],
     preferences: null,
 };
+const WORKSPACE_INVENTORY_REFRESH_MS = 5 * 60 * 1000;
 const launcherNames = {opencode: 'OpenCode', codex: 'Codex', hermes: 'Hermes', terminal: 'Terminal'};
 let currentEditorView = null;
 let currentEditorTabId = null;
@@ -29,6 +32,69 @@ let markdownTimer = null;
 let githubSearchTimer = null;
 const editorBundlePromises = new Map();
 const terminalFrameResizeTimers = new WeakMap();
+const terminalFrameLoadBound = new WeakSet();
+let terminalResizeObserver = null;
+
+function terminalViewFor(sessionId) {
+    return state.terminalViews.get(sessionId) || null;
+}
+function terminalFrameFor(sessionId) {
+    return terminalViewFor(sessionId)?.frame || null;
+}
+function activeTerminalFrame() {
+    return terminalFrameFor(state.frameSessionId);
+}
+function terminalViewFromSource(source) {
+    for (const view of state.terminalViews.values()) {
+        if (view.frame.contentWindow === source) return view;
+    }
+    return null;
+}
+function ensureTerminalView(session) {
+    let view = terminalViewFor(session.id);
+    if (view) return view;
+    let frame = $('terminal-frame');
+    if ([...state.terminalViews.values()].some(item => item.frame === frame)) frame = null;
+    if (!frame) {
+        frame = document.createElement('iframe');
+        frame.title = `Terminal de ${session.title || agentName(session)}`;
+        frame.hidden = true;
+        frame.dataset.sessionId = session.id;
+        $('work-surface').append(frame);
+    } else {
+        frame.dataset.sessionId = session.id;
+    }
+    frame.title = `Terminal de ${session.title || agentName(session)}`;
+    view = {sessionId:session.id, frame, ready:false, loaded:false, loadTimer:null};
+    state.terminalViews.set(session.id, view);
+    terminalResizeObserver?.observe(frame);
+    if (!terminalFrameLoadBound.has(frame)) {
+        terminalFrameLoadBound.add(frame);
+        frame.addEventListener('load', () => {
+            requestTerminalFrameResize(frame);
+            if (activeTerminalFrame() === frame) renderAgentControls();
+        });
+    }
+    return view;
+}
+function disposeTerminalView(sessionId) {
+    const view = terminalViewFor(sessionId);
+    if (!view) return;
+    clearTimeout(view.loadTimer);
+    notifyTerminalFrameVisibility(view.frame, false, true);
+    view.frame.src = 'about:blank';
+    terminalResizeObserver?.unobserve(view.frame);
+    if (view.frame.id !== 'terminal-frame') view.frame.remove();
+    else view.frame.hidden = true;
+    state.terminalViews.delete(sessionId);
+}
+function deactivateTerminalViews(activeSessionId = null) {
+    for (const [sessionId, view] of state.terminalViews) {
+        const visible = sessionId === activeSessionId;
+        view.frame.hidden = !visible;
+        notifyTerminalFrameVisibility(view.frame, visible, !visible);
+    }
+}
 
 function ensureEditorBundle(name) {
     const globalName = name === 'markdown' ? 'WebConsoleMarkdown' : name === 'merge' ? 'WebConsoleMerge' : null;
@@ -124,6 +190,9 @@ function activeTab() {
 function sessionFor(id) {
     return state.sessions.find(item => item.id === id) || null;
 }
+function inventoryRefreshDue(now = Date.now()) {
+    return !state.nextInventoryRefreshAt || now >= state.nextInventoryRefreshAt;
+}
 function isWorkspaceShell(session) {
     return session?.session_role === 'workspace_shell';
 }
@@ -171,14 +240,21 @@ function projectWorkspace(projectId, workspaceId) {
     return null;
 }
 
-async function refreshAll() {
+async function refreshAll({refreshOpen = false} = {}) {
     if (state.busy) return;
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+    if (!state.nextInventoryRefreshAt) state.nextInventoryRefreshAt = Date.now() + WORKSPACE_INVENTORY_REFRESH_MS;
+    if (refreshOpen) state.nextInventoryRefreshAt = Date.now() + WORKSPACE_INVENTORY_REFRESH_MS;
     state.busy = true;
     try {
-        const [projectData, sessionData] = await Promise.all([
-            api('/api/projects'), api('/api/sessions'),
-        ]);
-        state.projects = projectData.projects || [];
+        const requests = [api('/api/sessions', {cache:false})];
+        if (!state.projectsLoaded) requests.push(api('/api/projects', {cache:false}));
+        const [sessionData, projectData] = await Promise.all(requests);
+        if (projectData) {
+            state.projects = projectData.projects || [];
+            state.projectsLoaded = true;
+        }
         state.sessions = sessionData.sessions || [];
         if (!state.projects.some(item => item.id === state.selectedProjectId)) {
             state.selectedProjectId = state.projects[0]?.id || null;
@@ -192,10 +268,30 @@ async function refreshAll() {
             if (state.selectedProjectId) state.expandedProjects.add(state.selectedProjectId);
         }
         renderTree();
-        if (state.selectedProjectId && !state.workspaceData) await loadWorkspaces(state.selectedProjectId);
+        const selectedProjectOpen = state.selectedProjectId && state.expandedProjects.has(state.selectedProjectId);
+        if (selectedProjectOpen && !state.workspaceData) await loadWorkspaces(state.selectedProjectId);
         else if (state.selectedProjectId) refreshWorkspaceAgentCounts();
         if (!state.projects.length) renderCenter();
         if (state.selectedProjectId) loadMessages(state.selectedProjectId).catch(() => {});
+        const projectsToRefresh = new Set(state.expandedProjects);
+        for (const tab of state.tabs) {
+            const session = tab.type === 'terminal' && (sessionFor(tab.sessionId) || tab.session);
+            if (session?.project_id) projectsToRefresh.add(session.project_id);
+        }
+        for (const projectId of projectsToRefresh) {
+            if (refreshOpen) {
+                loadProjectWorkspaces(projectId, {force:true}).then(data => {
+                    if (data && state.selectedProjectId === projectId) {
+                        state.workspaceData = data;
+                        renderWorkspaceChrome();
+                        renderTree();
+                    }
+                }).catch(() => {});
+            } else if (!state.workspacesByProject.has(projectId)) {
+                loadProjectWorkspaces(projectId).catch(() => {});
+            }
+        }
+        renderTree();
     } catch (error) {
         setStatus('No se pudo actualizar el workspace', 'warning');
         if (!state.projects.length) {
@@ -204,7 +300,10 @@ async function refreshAll() {
         }
     } finally {
         state.busy = false;
-        if (!document.hidden) state.pollTimer = setTimeout(refreshAll, 5000);
+        if (!document.hidden) {
+            const delay = Math.max(0, state.nextInventoryRefreshAt - Date.now());
+            state.pollTimer = setTimeout(() => refreshAll({refreshOpen:true}), delay);
+        }
     }
 }
 
@@ -219,9 +318,27 @@ function refreshWorkspaceAgentCounts() {
     }
 }
 
-async function loadWorkspaces(projectId) {
-    const data = await api(`/api/projects/${encodeURIComponent(projectId)}/workspaces`);
+function loadProjectWorkspaces(projectId, {force = false} = {}) {
+    if (!force && state.workspacesByProject.has(projectId)) return Promise.resolve(state.workspacesByProject.get(projectId));
+    if (state.workspaceLoads.has(projectId)) return state.workspaceLoads.get(projectId);
+    const request = api(`/api/projects/${encodeURIComponent(projectId)}/workspaces`, {cache:false})
+        .then(data => {
+            if (!state.projects.some(project => project.id === projectId)) return null;
+            state.workspacesByProject.set(projectId, data);
+            renderTree();
+            return data;
+        })
+        .finally(() => {
+            if (state.workspaceLoads.get(projectId) === request) state.workspaceLoads.delete(projectId);
+        });
+    state.workspaceLoads.set(projectId, request);
+    return request;
+}
+
+async function loadWorkspaces(projectId, {force = false} = {}) {
+    const data = await loadProjectWorkspaces(projectId, {force});
     if (projectId !== state.selectedProjectId) return;
+    if (!data) return;
     state.workspaceData = data;
     if (!data.workspaces.some(item => item.id === state.selectedWorkspaceId)) {
         state.selectedWorkspaceId = data.workspaces[0]?.id || null;
@@ -232,6 +349,25 @@ async function loadWorkspaces(projectId) {
     renderCenter();
     renderWorkspaceChrome();
     await Promise.all([loadDirectory(''), refreshMessagesAndGit()]);
+}
+
+async function selectWorkspaceInProject(projectId, workspaceId) {
+    if (state.selectedProjectId !== projectId || !state.workspaceData) await selectProject(projectId);
+    if (state.selectedProjectId === projectId) selectWorkspace(workspaceId);
+}
+
+function toggleProjectExpansion(projectId) {
+    if (state.expandedProjects.has(projectId)) state.expandedProjects.delete(projectId);
+    else {
+        state.expandedProjects.add(projectId);
+        if (!state.workspacesByProject.has(projectId)) loadProjectWorkspaces(projectId).catch(() => renderTree());
+    }
+    renderTree();
+}
+function toggleWorkspaceExpansion(workspaceId) {
+    if (state.expandedWorkspaces.has(workspaceId)) state.expandedWorkspaces.delete(workspaceId);
+    else state.expandedWorkspaces.add(workspaceId);
+    renderTree();
 }
 
 async function selectProject(projectId) {
@@ -346,12 +482,12 @@ function closeMobileDrawers(restoreFocus = false) {
     if (restoreFocus && trigger?.isConnected) trigger.focus({preventScroll:true});
 }
 
-function notifyTerminalFrameVisibility(frame, visible) {
+function notifyTerminalFrameVisibility(frame, visible, immediate = false) {
     // A hidden terminal must release its tmux attach instead of waiting for a
     // render-lag watchdog to declare the view stale. The iframe cannot always
     // observe its own display:none reliably, so the workspace tells it directly.
     if (!frame?.contentWindow) return;
-    frame.contentWindow.postMessage({type:'webconsole:view-visibility', visible: Boolean(visible)}, window.location.origin);
+    frame.contentWindow.postMessage({type:'webconsole:view-visibility', visible: Boolean(visible), immediate}, window.location.origin);
 }
 
 function requestTerminalFrameResize(frame, delay = 50) {
@@ -434,7 +570,7 @@ function renderAgentControls() {
     if (attach) attach.disabled = !safeForInsertion;
     renderAttachmentTray();
     const frameSessionId = state.frameSessionId;
-    const frame = $('terminal-frame');
+    const frame = activeTerminalFrame();
     if (frameSessionId && frame?.contentWindow) {
         const sessionOwnsFrame = session?.id === frameSessionId;
         frame.contentWindow.postMessage({
@@ -481,7 +617,7 @@ function setTerminalExpanded(expanded, createIfMissing = true) {
         const shell = workspaceShellSession();
         if (!shell && createIfMissing) ensureWorkspaceTerminal(false);
         requestTerminalFrameResize($('shell-frame'));
-        requestTerminalFrameResize($('terminal-frame'));
+        requestTerminalFrameResize(activeTerminalFrame());
     }
 }
 
@@ -516,7 +652,7 @@ function canInsertForSession(sessionId) {
     const session = currentAgentSession();
     return Boolean(session && session.id === sessionId && !sessionEnded(session)
         && session.state !== 'permission' && session.notification?.kind !== 'permission'
-        && state.frameSessionId === sessionId && $('terminal-frame').contentWindow);
+        && state.frameSessionId === sessionId && activeTerminalFrame()?.contentWindow);
 }
 
 function insertAttachment(attachment) {
@@ -526,7 +662,7 @@ function insertAttachment(attachment) {
     }
     attachment.inserting = true;
     renderAttachmentTray();
-    $('terminal-frame').contentWindow.postMessage({
+    activeTerminalFrame().contentWindow.postMessage({
         type: 'webconsole:insert-attachment', session_id: attachment.session_id, attachment_id: attachment.id,
     }, window.location.origin);
 }
@@ -537,7 +673,7 @@ function uploadPickedAttachments(files) {
         toast('Selecciona una sesión de agente que esté lista para recibir entrada.');
         return;
     }
-    const frame = $('terminal-frame');
+    const frame = activeTerminalFrame();
     if (state.frameSessionId !== session.id || !frame?.contentWindow) {
         toast('Abre la pestaña del agente para ver el progreso de la subida.');
         return;
@@ -584,8 +720,8 @@ function contextMenuEntries(type, item) {
     if (type === 'project') {
         const dirty = filesWithUnsavedChanges(tab => tab.projectId === item.id);
         const hasSessions = state.sessions.some(session => session.project_id === item.id) || item.session_count > 0;
-        const loadedWorktrees = state.workspaceData?.project?.id === item.id
-            ? state.workspaceData.workspaces.filter(workspace => workspace.kind === 'managed_worktree').length : 0;
+        const loadedWorktrees = (state.workspacesByProject.get(item.id)?.workspaces || [])
+            .filter(workspace => workspace.kind === 'managed_worktree').length;
         const hasManagedWorktrees = Math.max(item.managed_worktree_count || 0, loadedWorktrees) > 0;
         const blocked = hasSessions
             ? 'Elimina explícitamente las sesiones asociadas antes de quitar el proyecto.'
@@ -615,10 +751,10 @@ function contextMenuEntries(type, item) {
                         : dirty ? 'Guarda o cierra los archivos con cambios sin guardar.'
                             : item.git?.changes?.length ? 'Este worktree tiene cambios Git; consérvalos o límpialos antes de retirarlo.' : '';
         return [
-            menuEntry('Seleccionar workspace', () => selectWorkspace(item.id)),
-            menuEntry('Crear agente', () => { selectWorkspace(item.id); openAgentDialog(); }),
-            menuEntry('Abrir terminal', () => { selectWorkspace(item.id); setTerminalExpanded(true); }),
-            menuEntry('Crear worktree', () => { selectWorkspace(item.id); openWorktreeDialog(); }, {
+            menuEntry('Seleccionar workspace', () => selectWorkspaceInProject(item.project_id, item.id)),
+            menuEntry('Crear agente', async () => { await selectWorkspaceInProject(item.project_id, item.id); openAgentDialog(); }),
+            menuEntry('Abrir terminal', async () => { await selectWorkspaceInProject(item.project_id, item.id); setTerminalExpanded(true); }),
+            menuEntry('Crear worktree', async () => { await selectWorkspaceInProject(item.project_id, item.id); openWorktreeDialog(); }, {
                 disabled:!item.git?.is_git,
                 description:!item.git?.is_git ? 'Este workspace no pertenece a un repositorio Git.' : '',
             }),
@@ -732,10 +868,9 @@ async function removeSession(session) {
         state.pendingAttachments = state.pendingAttachments.filter(item => item.session_id !== session.id);
         if (state.activeTabId === `terminal:${session.id}`) state.activeTabId = null;
         if (state.selectedSessionId === session.id) state.selectedSessionId = null;
+        disposeTerminalView(session.id);
         if (state.frameSessionId === session.id) {
             state.frameSessionId = null;
-            const frame = $('terminal-frame');
-            if (frame) frame.src = 'about:blank';
         }
         renderTree(); renderTabs(); renderCenter(); renderWorkspaceChrome();
         toast(active ? 'Sesión terminada y eliminada.' : 'Registro de la sesión eliminado.');
@@ -757,10 +892,13 @@ async function removeProject(project) {
         await api(`/api/projects/${encodeURIComponent(project.id)}`, {method:'DELETE'});
         const removedTabs = state.tabs.filter(tab => tab.projectId === project.id ||
             (tab.type === 'terminal' && (sessionFor(tab.sessionId) || tab.session)?.project_id === project.id));
+        for (const tab of removedTabs) if (tab.type === 'terminal') disposeTerminalView(tab.sessionId);
         state.tabs = state.tabs.filter(tab => !removedTabs.includes(tab));
         const activeWasRemoved = removedTabs.some(tab => tab.id === state.activeTabId);
         if (activeWasRemoved) { state.activeTabId = null; state.selectedSessionId = null; }
         state.projects = state.projects.filter(item => item.id !== project.id);
+        state.workspacesByProject.delete(project.id);
+        state.workspaceLoads.delete(project.id);
         state.expandedProjects.delete(project.id);
         if (state.selectedProjectId === project.id) {
             state.selectedProjectId = state.projects[0]?.id || null;
@@ -779,9 +917,9 @@ async function removeWorkspace(workspace) {
         toast('Guarda o cierra los archivos con cambios sin guardar antes de retirar el workspace.');
         return;
     }
-    const project = state.projects.find(item => item.id === workspace.project_id) || selectedProject();
-    if (!project || state.workspaceData?.project?.id !== project.id
-            || !state.workspaceData.workspaces.some(item => item.id === workspace.id)) {
+    const project = state.projects.find(item => item.id === workspace.project_id);
+    const projectData = project && state.workspacesByProject.get(project.id);
+    if (!project || !projectData?.workspaces.some(item => item.id === workspace.id)) {
         toast('Actualiza el proyecto antes de retirar este workspace.');
         return;
     }
@@ -791,11 +929,14 @@ async function removeWorkspace(workspace) {
         confirmLabel:'Retirar worktree',
     })) return;
     const projectId = project.id;
+    const affectsSelectedProject = state.selectedProjectId === projectId;
     const active = activeTab();
-    const activeWorkspaceId = active?.type === 'terminal'
-        ? (sessionFor(active.sessionId) || active.session)?.workspace_id : active?.workspaceId;
+    const activeWorkspaceId = affectsSelectedProject ? (active?.type === 'terminal'
+        ? (sessionFor(active.sessionId) || active.session)?.workspace_id : active?.workspaceId) : null;
     try {
         await api(`/api/workspaces/${encodeURIComponent(workspace.id)}`, {method:'DELETE'});
+        const cached = state.workspacesByProject.get(projectId);
+        if (cached) cached.workspaces = cached.workspaces.filter(item => item.id !== workspace.id);
         const projectRecord = state.projects.find(item => item.id === projectId);
         if (projectRecord) {
             projectRecord.workspace_count = Math.max(0, (projectRecord.workspace_count || 0) - 1);
@@ -803,15 +944,21 @@ async function removeWorkspace(workspace) {
         }
         const removedTabs = state.tabs.filter(tab => tab.type === 'file' && tab.workspaceId === workspace.id
             || tab.type === 'terminal' && (sessionFor(tab.sessionId) || tab.session)?.workspace_id === workspace.id);
+        for (const tab of removedTabs) if (tab.type === 'terminal') disposeTerminalView(tab.sessionId);
         state.tabs = state.tabs.filter(tab => !removedTabs.includes(tab));
         if (removedTabs.some(tab => tab.id === state.activeTabId)) {
             state.activeTabId = null; state.selectedSessionId = null;
         }
         state.directoryCache.clear();
-        state.workspaceData = null;
-        state.selectedWorkspaceId = activeWorkspaceId && activeWorkspaceId !== workspace.id ? activeWorkspaceId : null;
-        state.terminalPrefsWorkspaceId = null;
-        await loadWorkspaces(projectId);
+        if (affectsSelectedProject) {
+            state.workspaceData = projectData;
+            state.selectedWorkspaceId = activeWorkspaceId && activeWorkspaceId !== workspace.id
+                ? activeWorkspaceId : projectData.workspaces[0]?.id || null;
+            state.terminalPrefsWorkspaceId = null;
+            await loadWorkspaces(projectId, {force:true});
+        } else {
+            renderTree();
+        }
         toast('Worktree retirado; su rama Git se conservó.');
     } catch (error) { toast(error.message); }
 }
@@ -868,16 +1015,7 @@ function renderTree() {
         const count = agentSessions.filter(session => session.project_id === project.id).length;
         if (count) toggle.append(node('span', 'tree-counter', String(count)));
         toggle.title = project.path;
-        toggle.addEventListener('click', () => {
-            if (project.id !== state.selectedProjectId) {
-                state.expandedProjects.add(project.id);
-                selectProject(project.id);
-                return;
-            }
-            state.expandedProjects.has(project.id) ? state.expandedProjects.delete(project.id) : state.expandedProjects.add(project.id);
-            renderTree();
-        });
-        bindContextMenu(row, toggle, 'project', project);
+        toggle.addEventListener('click', () => toggleProjectExpansion(project.id));
         const quickAdd = node('button', 'tree-add', '+');
         quickAdd.type = 'button'; quickAdd.title = 'Crear agente en este proyecto'; quickAdd.setAttribute('aria-label', `Crear agente en ${project.name}`);
         quickAdd.addEventListener('click', event => { event.stopPropagation(); selectProject(project.id).then(openAgentDialog); });
@@ -885,10 +1023,19 @@ function renderTree() {
         context.type = 'button'; context.title = 'Opciones del proyecto'; context.setAttribute('aria-label', `Opciones de ${project.name}`);
         context.setAttribute('aria-haspopup', 'menu'); context.setAttribute('aria-expanded', 'false');
         context.addEventListener('click', event => { event.stopPropagation(); openContextMenu('project', project, event); });
+        bindContextMenu(row, context, 'project', project);
         row.append(toggle, quickAdd, context); group.append(row);
-        if (expanded && state.workspaceData?.project?.id === project.id) {
+        if (expanded) {
             const list = node('div', 'workspace-list');
-            for (const workspace of state.workspaceData.workspaces) {
+            const projectData = state.workspacesByProject.get(project.id);
+            if (!projectData) {
+                list.append(node('div', 'sidebar-loading', state.workspaceLoads.has(project.id) ? 'Cargando ramas…' : 'No se pudieron cargar las ramas. Contrae y vuelve a desplegar para reintentar.'));
+                group.append(list);
+                fragment.append(group);
+                continue;
+            }
+            if (!projectData.workspaces?.length) list.append(node('div', 'no-agents', 'Este proyecto no tiene ramas o workspaces disponibles.'));
+            for (const workspace of projectData.workspaces || []) {
                 const sessions = agentSessions.filter(session => session.workspace_id === workspace.id && session.project_id === project.id);
                 const workspaceNode = node('div', 'workspace-node');
                 const workspaceRow = node('div', `workspace-row ${workspace.id === state.selectedWorkspaceId ? 'selected' : ''}`);
@@ -899,24 +1046,16 @@ function renderTree() {
                 const branch = workspace.git?.branch || workspace.branch;
                 if (branch) workspaceButton.append(node('span', 'workspace-kind', branch));
                 workspaceButton.title = workspace.path;
-                workspaceButton.addEventListener('click', () => {
-                    if (workspace.id !== state.selectedWorkspaceId) {
-                        state.expandedWorkspaces.add(workspace.id);
-                        selectWorkspace(workspace.id);
-                        return;
-                    }
-                    state.expandedWorkspaces.has(workspace.id) ? state.expandedWorkspaces.delete(workspace.id) : state.expandedWorkspaces.add(workspace.id);
-                    renderTree();
-                });
+                workspaceButton.addEventListener('click', () => toggleWorkspaceExpansion(workspace.id));
                 const workspaceContext = {...workspace, project_id:project.id};
-                bindContextMenu(workspaceRow, workspaceButton, 'workspace', workspaceContext);
                 workspaceRow.append(workspaceButton);
                 const add = node('button', 'tree-add', '+'); add.type = 'button'; add.title = 'Crear agente en este workspace'; add.setAttribute('aria-label', `Crear agente en ${workspace.name}`);
-                add.addEventListener('click', event => { event.stopPropagation(); selectWorkspace(workspace.id); openAgentDialog(); });
+                add.addEventListener('click', event => { event.stopPropagation(); selectWorkspaceInProject(project.id, workspace.id).then(openAgentDialog); });
                 const context = node('button', 'tree-context', '⋯');
                 context.type = 'button'; context.title = 'Opciones del workspace'; context.setAttribute('aria-label', `Opciones de ${workspace.name}`);
                 context.setAttribute('aria-haspopup', 'menu'); context.setAttribute('aria-expanded', 'false');
                 context.addEventListener('click', event => { event.stopPropagation(); openContextMenu('workspace', workspaceContext, event); });
+                bindContextMenu(workspaceRow, context, 'workspace', workspaceContext);
                 workspaceRow.append(add, context); workspaceNode.append(workspaceRow);
                 if (isOpen) {
                     const agents = node('div', 'agent-list');
@@ -1026,7 +1165,18 @@ function updateTerminalStatus(session) {
 }
 
 function setTerminalFrameStatus(sessionId, status) {
+    const view = terminalViewFor(sessionId);
+    if (status === 'rendered' && view) {
+        view.ready = true;
+        clearTimeout(view.loadTimer);
+        view.loadTimer = null;
+    }
+    if ((status === 'ended' || status === 'unavailable') && view) {
+        clearTimeout(view.loadTimer);
+        view.loadTimer = null;
+    }
     if (sessionId !== state.frameSessionId) return;
+    state.terminalFrameReady = Boolean(view?.ready);
     const loading = $('terminal-loading');
     if (!loading) return;
     const title = $('terminal-loading-title');
@@ -1043,16 +1193,9 @@ function setTerminalFrameStatus(sessionId, status) {
         ended: ['Sesión finalizada', 'El proceso terminó; no se iniciará de nuevo automáticamente.'],
     };
     if (status === 'rendered') {
-        state.terminalFrameReady = true;
-        clearTimeout(state.terminalLoadTimer);
-        state.terminalLoadTimer = null;
         loading.hidden = true;
         loading.setAttribute('aria-busy', 'false');
         return;
-    }
-    if (status === 'ended' || status === 'unavailable') {
-        clearTimeout(state.terminalLoadTimer);
-        state.terminalLoadTimer = null;
     }
     if (status === 'error' && state.terminalFrameReady) status = 'reconnecting';
     if ((status === 'reconnecting' || status === 'resyncing') && !state.terminalFrameReady) status = 'connecting';
@@ -1067,20 +1210,26 @@ function setTerminalFrameStatus(sessionId, status) {
 }
 
 function startTerminalLoadTimer(sessionId) {
-    clearTimeout(state.terminalLoadTimer);
-    state.terminalLoadTimer = setTimeout(() => {
-        if (state.frameSessionId !== sessionId || state.terminalFrameReady || activeTab()?.sessionId !== sessionId) return;
+    const view = terminalViewFor(sessionId);
+    if (!view) return;
+    clearTimeout(view.loadTimer);
+    view.loadTimer = setTimeout(() => {
+        if (view.ready) return;
         setTerminalFrameStatus(sessionId, 'error');
-        $('terminal-loading-title').textContent = 'La conexión está tardando más de lo normal';
-        $('terminal-loading-detail').textContent = 'La sesión no se ha reiniciado. Puedes reintentar la vista.';
+        if (state.frameSessionId === sessionId) {
+            $('terminal-loading-title').textContent = 'La conexión está tardando más de lo normal';
+            $('terminal-loading-detail').textContent = 'La sesión no se ha reiniciado. Puedes reintentar la vista.';
+        }
     }, 30000);
 }
 
 function retryTerminalFrame() {
     const session = sessionFor(state.frameSessionId);
     if (!session?.token) return;
-    const frame = $('terminal-frame');
+    const frame = activeTerminalFrame();
     state.terminalFrameReady = false;
+    const view = terminalViewFor(session.id);
+    if (view) view.ready = false;
     setTerminalFrameStatus(session.id, 'loading');
     startTerminalLoadTimer(session.id);
     // Reload only the disposable browser attachment; tmux continues running.
@@ -1090,14 +1239,14 @@ function retryTerminalFrame() {
 function renderCenter() {
     renderAgentControls();
     const tab = activeTab();
-    const frame = $('terminal-frame');
     const editor = $('editor-view');
     const welcome = $('welcome-view');
     if (!tab) {
         disposeEditorView(); disposeMergeView();
         $('terminal-loading').hidden = true;
-        frame.hidden = true; editor.hidden = true; welcome.hidden = false;
-        notifyTerminalFrameVisibility(frame, false);
+        deactivateTerminalViews();
+        state.frameSessionId = null; state.terminalFrameReady = false;
+        editor.hidden = true; welcome.hidden = false;
         const project = selectedProject();
         if (!project) {
             $('welcome-title').textContent = 'Un proyecto, todos tus agentes.';
@@ -1120,25 +1269,34 @@ function renderCenter() {
     if (tab.type === 'terminal') {
         disposeEditorView(); disposeMergeView();
         editor.hidden = true;
-        frame.hidden = false;
-        notifyTerminalFrameVisibility(frame, true);
         const session = sessionFor(tab.sessionId) || tab.session;
         if (!session?.token) {
+            deactivateTerminalViews();
+            state.frameSessionId = null; state.terminalFrameReady = false;
             $('terminal-loading').hidden = true;
-            frame.hidden = true; welcome.hidden = false;
-            notifyTerminalFrameVisibility(frame, false);
+            welcome.hidden = false;
             $('welcome-title').textContent = 'No se puede recuperar esta terminal';
             $('welcome-copy').textContent = 'Actualiza las sesiones; no se ha detenido el proceso tmux.';
             return;
         }
-        if (state.frameSessionId !== session.id) {
-            state.frameSessionId = session.id;
-            state.terminalFrameReady = false;
+        const view = ensureTerminalView(session);
+        deactivateTerminalViews(session.id);
+        const frame = view.frame;
+        const switched = state.frameSessionId !== session.id;
+        state.frameSessionId = session.id;
+        state.terminalFrameReady = view.ready;
+        frame.hidden = false;
+        notifyTerminalFrameVisibility(frame, true);
+        if (!view.loaded) {
+            view.loaded = true;
             setTerminalFrameStatus(session.id, 'loading');
             startTerminalLoadTimer(session.id);
             frame.src = `/c/${encodeURIComponent(session.token)}?embed=1`;
-        } else if (!state.terminalFrameReady && $('terminal-loading').hidden) {
-            setTerminalFrameStatus(session.id, 'loading');
+        } else if (switched && view.ready) {
+            $('terminal-loading').hidden = true;
+            $('terminal-loading').setAttribute('aria-busy', 'false');
+        } else if (!view.ready && (switched || $('terminal-loading').hidden)) {
+            setTerminalFrameStatus(session.id, view.loaded ? 'connecting' : 'loading');
             startTerminalLoadTimer(session.id);
         }
         state.selectedSessionId = session.id;
@@ -1150,11 +1308,12 @@ function renderCenter() {
         }
         if (workspace && workspace.id !== state.selectedWorkspaceId) state.selectedWorkspaceId = workspace.id;
         updateTerminalStatus(session);
+        requestTerminalFrameResize(frame);
     } else if (tab.type === 'file') {
         disposeMergeView();
         $('terminal-loading').hidden = true;
-        frame.hidden = true;
-        notifyTerminalFrameVisibility(frame, false);
+        deactivateTerminalViews();
+        state.frameSessionId = null; state.terminalFrameReady = false;
         editor.hidden = false;
         state.selectedSessionId = null;
         renderEditor(tab);
@@ -1163,8 +1322,8 @@ function renderCenter() {
     } else if (tab.type === 'diff') {
         disposeEditorView();
         $('terminal-loading').hidden = true;
-        frame.hidden = true;
-        notifyTerminalFrameVisibility(frame, false);
+        deactivateTerminalViews();
+        state.frameSessionId = null; state.terminalFrameReady = false;
         editor.hidden = false;
         state.selectedSessionId = null;
         renderGitDiffTab(tab);
@@ -1280,6 +1439,7 @@ function closeTab(tabId) {
     }
     const index = state.tabs.indexOf(tab);
     state.tabs.splice(index, 1);
+    if (tab.type === 'terminal') disposeTerminalView(tab.sessionId);
     if (state.activeTabId === tabId) {
         const next = state.tabs[Math.max(0, index - 1)] || state.tabs[0] || null;
         state.activeTabId = next?.id || null;
@@ -2286,6 +2446,8 @@ async function createProject(event) {
 async function adoptCreatedProject(project) {
     state.selectedProjectId = project.id; state.workspaceData = null; state.selectedWorkspaceId = null;
     state.projects = [...state.projects.filter(item => item.id !== project.id), {...project, workspace_count:1, session_count:0}];
+    state.projectsLoaded = true;
+    state.expandedProjects.add(project.id);
     try { const sessionData = await api('/api/sessions'); state.sessions = sessionData.sessions || []; } catch (_) {}
     renderTree();
     await loadWorkspaces(project.id);
@@ -2588,7 +2750,7 @@ async function createWorktree(event) {
         const result = await api(`/api/projects/${encodeURIComponent(project.id)}/workspaces`, jsonOptions('POST', payload));
         $('worktree-dialog').close();
         state.workspaceData = null;
-        await loadWorkspaces(project.id);
+        await loadWorkspaces(project.id, {force:true});
         selectWorkspace(result.workspace.id);
         toast(`Worktree creado en ${result.workspace.path}`);
     } catch (error) { $('worktree-error').hidden = false; $('worktree-error').textContent = error.message; }
@@ -2633,9 +2795,10 @@ function dispatchAgentAction(session, action) {
     clearInterval(state.actionTimer);
     const attempt = () => {
         if (!state.pendingAction) return;
-        if (state.frameSessionId !== session.id || !$('terminal-frame').contentWindow) return;
+        const frame = activeTerminalFrame();
+        if (state.frameSessionId !== session.id || !frame?.contentWindow) return;
         state.pendingAction.attempts++;
-        $('terminal-frame').contentWindow.postMessage({type:'webconsole:agent-action', action:action.id, session_id:session.id}, window.location.origin);
+        frame.contentWindow.postMessage({type:'webconsole:agent-action', action:action.id, session_id:session.id}, window.location.origin);
         if (action.id === 'interrupt') {
             clearInterval(state.actionTimer);
             state.actionTimer = setTimeout(() => {
@@ -2665,7 +2828,7 @@ function interruptWorkspaceShell() {
 }
 
 function handleActionResult(event) {
-    if (event.origin !== window.location.origin || event.source !== $('terminal-frame').contentWindow || event.data?.type !== 'webconsole:action-result') return;
+    if (event.origin !== window.location.origin || event.source !== activeTerminalFrame()?.contentWindow || event.data?.type !== 'webconsole:action-result') return;
     if (!state.pendingAction || state.pendingAction.action !== event.data.action
             || state.pendingAction.sessionId !== event.data.session_id) return;
     if (event.data.success) {
@@ -2677,11 +2840,11 @@ function handleActionResult(event) {
 
 function handleTerminalMessage(event) {
     if (event.origin !== window.location.origin) return;
-    const terminalFrame = $('terminal-frame');
-    if (!terminalFrame) return;
-    if (event.source === terminalFrame.contentWindow) {
+    const view = terminalViewFromSource(event.source);
+    if (view) {
         const data = event.data || {};
-        if (data.type === 'webconsole:terminal-status' && data.session_id === state.frameSessionId
+        if (data.session_id !== view.sessionId) return;
+        if (data.type === 'webconsole:terminal-status' && data.session_id === view.sessionId
                 && typeof data.state === 'string') {
             setTerminalFrameStatus(data.session_id, data.state);
         } else if (data.type === 'webconsole:attachment-uploaded' && data.attachment?.id
@@ -2813,7 +2976,7 @@ function attachEvents() {
     }
     $('refresh-all').addEventListener('click', async () => {
         state.workspaceData = null;
-        await refreshAll();
+        await refreshAll({refreshOpen:true});
         if (state.selectedProjectId) await loadWorkspaces(state.selectedProjectId);
     });
     $('refresh-files').addEventListener('click', () => { state.directoryCache.clear(); loadDirectory('', true); });
@@ -2889,7 +3052,7 @@ function attachEvents() {
     window.addEventListener('webconsole:viewportchange', () => {
         updateMobileDrawerState();
         if (state.terminalExpanded) setTerminalHeight(state.terminalHeight);
-        requestTerminalFrameResize($('terminal-frame'));
+        requestTerminalFrameResize(activeTerminalFrame());
         requestTerminalFrameResize($('shell-frame'));
     });
     window.addEventListener('scroll', () => closeContextMenu(false), true);
@@ -2925,18 +3088,16 @@ function attachEvents() {
     document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => $(button.dataset.close).close()));
     window.addEventListener('message', handleActionResult);
     window.addEventListener('message', handleTerminalMessage);
-    $('terminal-frame')?.addEventListener('load', () => {
-        requestTerminalFrameResize($('terminal-frame'));
-        renderAgentControls();
-    });
     $('shell-frame')?.addEventListener('load', () => {
         const content = $('terminal-drawer-content');
         if (content && !content.hidden) requestTerminalFrameResize($('shell-frame'));
     });
-    const resizeObserver = new ResizeObserver(() => {
-        const frame = $('terminal-frame');
-        if (frame && !frame.hidden && frame.getBoundingClientRect().width > 0 && frame.getBoundingClientRect().height > 0) {
-            requestTerminalFrameResize(frame);
+    terminalResizeObserver = new ResizeObserver(() => {
+        for (const view of state.terminalViews.values()) {
+            const frame = view.frame;
+            if (frame && !frame.hidden && frame.getBoundingClientRect().width > 0 && frame.getBoundingClientRect().height > 0) {
+                requestTerminalFrameResize(frame);
+            }
         }
         const shell = $('shell-frame');
         const shellContent = $('terminal-drawer-content');
@@ -2946,10 +3107,9 @@ function attachEvents() {
         }
     });
     const workSurface = $('work-surface');
-    if (workSurface) resizeObserver.observe(workSurface);
-    const agentFrame = $('terminal-frame');
-    if (agentFrame) resizeObserver.observe(agentFrame);
-    if ($('workspace-terminal')) resizeObserver.observe($('workspace-terminal'));
+    if (workSurface) terminalResizeObserver.observe(workSurface);
+    for (const view of state.terminalViews.values()) terminalResizeObserver.observe(view.frame);
+    if ($('workspace-terminal')) terminalResizeObserver.observe($('workspace-terminal'));
     $('toggle-projects').addEventListener('click', event => {
         setMobileDrawer('projects', !$('project-sidebar').classList.contains('open'), event.currentTarget);
     });
@@ -2966,12 +3126,12 @@ function attachEvents() {
     document.addEventListener('visibilitychange', () => {
         // A backgrounded workspace tab must not keep a tmux attach alive while
         // its renderer is throttled; the iframe cannot observe the parent tab.
-        const frame = $('terminal-frame');
+        const frame = activeTerminalFrame();
         if (frame && !frame.hidden) notifyTerminalFrameVisibility(frame, !document.hidden);
         clearTimeout(state.pollTimer);
-        if (!document.hidden) refreshAll();
+        if (!document.hidden) refreshAll({refreshOpen:inventoryRefreshDue()});
     });
-    window.addEventListener('online', refreshAll);
+    window.addEventListener('online', () => refreshAll({refreshOpen:inventoryRefreshDue()}));
 }
 
 document.addEventListener('DOMContentLoaded', () => {

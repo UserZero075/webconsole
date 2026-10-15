@@ -517,6 +517,23 @@ test('the workspace can suspend and resume the embedded view directly', async ()
   assert.equal(vm.runInContext('viewSuspended', context), false, 'parent showed the view');
 });
 
+test('an inactive agent tab releases its attach immediately', async () => {
+  const {context, clock, windowListeners} = await buildContext();
+  const socket = connectNow(context, clock);
+  socket.accept();
+  socket.deliver({type: 'ready', flow_version: 1});
+
+  fire(windowListeners, 'message', {
+    origin:'https://example.test', source:context.window.parent,
+    data:{type:'webconsole:view-visibility', visible:false, immediate:true},
+  });
+
+  assert.equal(socket.readyState, FakeWebSocket.CLOSED, 'inactive tabs do not retain a WebSocket');
+  assert.equal(vm.runInContext('viewSuspended', context), true);
+  clock.advance(120000);
+  assert.equal(FakeWebSocket.instances.length, 1, 'suspended tab sends and receives no reconnect traffic');
+});
+
 test('a message from another origin cannot suspend the terminal', async () => {
   const {context, clock, windowListeners} = await buildContext();
   const socket = connectNow(context, clock);

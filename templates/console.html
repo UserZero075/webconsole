@@ -151,7 +151,13 @@
         let ws = null;
         let reconnectAttempts = 0;
         let reconnectTimer = null;
+        let reconnectAt = 0;
+        let connectDeadlineTimer = null;
         let heartbeatTimer = null;
+        let suspendTimer = null;
+        let viewSuspended = false;
+        let activeFlowState = null;
+        let parentViewVisible = true;
         let lastResponseAt = 0;
         let sessionEnded = false;
         let terminalReady = false;
@@ -164,9 +170,28 @@
         const TERMINAL_RENDER_LAG_MS = 4000;
         const TERMINAL_RENDER_QUEUE_LIMIT = 128 * 1024;
         const TERMINAL_RESYNC_COOLDOWN_MS = 8000;
+        // A socket that never reaches "ready" must not hold the view hostage.
+        const TERMINAL_HANDSHAKE_TIMEOUT_MS = 15000;
+        // Retry while the pane is not measurable; the parent resize is the fast path.
+        const TERMINAL_UNMEASURED_RETRY_MS = 5000;
+        // A view rejected because every slot is taken comes back with a slower floor.
+        const TERMINAL_CLIENT_LIMIT_FLOOR_MS = 5000;
+        // A hidden view must detach deliberately, before either render-lag
+        // watchdog (4s) can force a resync. Keeping the slot would also block a
+        // fifth view while this one is invisible.
+        const TERMINAL_SUSPEND_GRACE_MS = 2000;
+        const TERMINAL_STALE_AFTER_MS = 75000;
         const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
         const MAX_VISIBLE_ATTACHMENT_TRANSFERS = 10;
         let lastResyncAt = 0;
+        const terminalDiagnosticsEnabled = new URLSearchParams(window.location.search || '').get('diag') === '1'
+            || localStorage.getItem('webconsole.terminal.debug') === '1';
+
+        function terminalDiagnostic(event, details = {}) {
+            if (!terminalDiagnosticsEnabled) return;
+            // Never include the bearer token, request URL, or terminal payload.
+            console.debug('[webconsole-terminal]', {event, session_id:sessionId, at:Date.now(), ...details});
+        }
         const attachmentTransfers = [];
         let nextAttachmentTransferId = 1;
         let attachmentUploadActive = false;
@@ -254,9 +279,12 @@
 
         const scrollHint = document.getElementById('terminal-scroll-hint');
         const scrollControls = document.getElementById('terminal-scroll-controls');
-        const touchScroll = window.WebConsoleTerminalTouch.bind(terminal, state => {
-            updateTerminalScrollState(state === 'unsupported');
-        });
+        function bindTouchScroll() {
+            return window.WebConsoleTerminalTouch.bind(terminal, state => {
+                updateTerminalScrollState(state === 'unsupported');
+            });
+        }
+        let touchScroll = bindTouchScroll();
 
         function updateTerminalScrollState(showUnsupported = false) {
             const buffer = terminal.buffer.active;
@@ -304,7 +332,9 @@
                 if (document.hidden) return;
                 if (!fitTerminal()) return;
                 const dims = sendResize();
-                if (dims && !ws && !sessionEnded) connect();
+                // The pane is measurable again, so reconnect now rather than
+                // waiting out a backoff started while it was hidden.
+                if (dims && !ws && !sessionEnded) scheduleConnect(0, true);
             }, 100);
         }
 
@@ -706,6 +736,14 @@
         };
         window.addEventListener('message', event => {
             if (!embedded || event.origin !== window.location.origin || event.source !== window.parent) return;
+            if (event.data?.type === 'webconsole:view-visibility') {
+                // The workspace knows when it hides this pane; trust it over the
+                // iframe's own document state, which browsers report inconsistently.
+                parentViewVisible = Boolean(event.data.visible);
+                if (parentViewVisible) resumeView();
+                else scheduleSuspend();
+                return;
+            }
             if (event.data?.type === 'webconsole:session-state' && event.data.session_id === sessionId) {
                 attachmentInputAllowed = Boolean(event.data.input_allowed) && event.data.state !== 'permission';
                 return;
@@ -1099,7 +1137,8 @@
 
         function scheduleTerminalLagCheck(socket, flowState) {
             clearTimeout(flowState.lagTimer);
-            if (flowState.resyncing || ws !== socket) return;
+            // A hidden view cannot render; its watchdog must not force a resync.
+            if (flowState.resyncing || ws !== socket || viewSuspended || viewIsHidden()) return;
             const oldest = flowState.active || flowState.queue[0];
             if (!oldest) return;
             const remaining = TERMINAL_RENDER_LAG_MS - (Date.now() - oldest.queuedAt);
@@ -1155,7 +1194,11 @@
         }
 
         function requestTerminalResync(socket, flowState) {
-            if (ws !== socket || flowState.resyncing || sessionEnded) return;
+            if (ws !== socket || flowState.resyncing || sessionEnded || viewSuspended) return;
+            if (viewIsHidden()) {
+                suspendView('hidden');
+                return;
+            }
             flowState.resyncing = true;
             flowState.queue.length = 0;
             flowState.pendingBytes = flowState.active?.payload.byteLength || 0;
@@ -1166,13 +1209,95 @@
             try { socket.close(4000, 'Resynchronizing terminal view'); } catch (_) {}
         }
 
+        // A hidden view releases its tmux attach instead of letting a render-lag
+        // watchdog force a resync. tmux keeps the shell; the next visible attach
+        // redraws the current screen from scratch.
+        function viewIsHidden() {
+            return document.hidden || (embedded && document.visibilityState === 'hidden')
+                || (embedded && !parentViewVisible);
+        }
+
+        function suspendView(reason) {
+            clearTimeout(suspendTimer);
+            suspendTimer = null;
+            if (viewSuspended || sessionEnded) return;
+            viewSuspended = true;
+            // Drop render bookkeeping: no watchdog may fire for a hidden view.
+            if (ws) {
+                const flowState = activeFlowState;
+                if (flowState) {
+                    clearTimeout(flowState.lagTimer);
+                    flowState.lagTimer = null;
+                    flowState.resyncing = true;
+                    flowState.queue.length = 0;
+                    flowState.pendingBytes = 0;
+                }
+            }
+            const socket = ws;
+            ws = null;
+            clearTimeout(connectDeadlineTimer);
+            if (socket) {
+                try { socket.close(4000, 'View suspended'); } catch (_) {}
+            }
+            terminalDiagnostic('suspended', {reason});
+            if (reason === 'hidden') reportTerminalState('suspended');
+        }
+
+        function scheduleSuspend() {
+            if (viewSuspended || sessionEnded || suspendTimer) return;
+            suspendTimer = setTimeout(() => {
+                suspendTimer = null;
+                if (viewIsHidden()) suspendView('hidden');
+            }, TERMINAL_SUSPEND_GRACE_MS);
+        }
+
+        function resumeView() {
+            clearTimeout(suspendTimer);
+            suspendTimer = null;
+            if (!viewSuspended) return;
+            viewSuspended = false;
+            reconnectAttempts = 0;
+            terminalDiagnostic('resumed');
+            // A fresh attach redraws the screen tmux already holds.
+            scheduleConnect(0, true);
+        }
+
+        // Single scheduler for every connect attempt. Event handlers (online,
+        // visibility, parent resize) and the heartbeat all funnel through here so
+        // a late event can never shorten the backoff of a pending attempt.
+        function scheduleConnect(delay, force = false) {
+            if (sessionEnded || viewSuspended) return;
+            const wait = Math.max(0, delay || 0);
+            if (reconnectTimer && !force) {
+                // Compare absolute deadlines: a caller asking for "now" must not
+                // pull forward an attempt already scheduled further out.
+                if (Date.now() + wait >= reconnectAt) return;
+            }
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectAt = Date.now() + wait;
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, wait);
+        }
+
         function connect() {
             if (sessionEnded || (ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(ws.readyState))) return;
-            clearTimeout(reconnectTimer);
+            if (navigator.onLine === false) {
+                updateConnectionStatus('offline');
+                reportTerminalState('offline');
+                terminalDiagnostic('offline');
+                return;
+            }
             const dims = proposeTerminalDimensions();
             // A hidden/zero-sized iframe must not negotiate guessed dimensions.
             // Its parent sends webconsole:resize when the pane becomes visible.
-            if (!dims) return;
+            if (!dims) {
+                // Never drop the attempt: without a retry the view stays dark until
+                // an unrelated resize happens to fire.
+                scheduleConnect(TERMINAL_UNMEASURED_RETRY_MS);
+                return;
+            }
             updateConnectionStatus('connecting');
             terminalReady = false;
             transportReady = false;
@@ -1183,13 +1308,23 @@
             lastSentDimensions = {cols:initialCols, rows:initialRows};
             const query = new URLSearchParams({token, cols: initialCols, rows: initialRows, flow:TERMINAL_FLOW_VERSION});
             const socket = new WebSocket(`${protocol}//${window.location.host}/ws/${sessionId}?${query}`);
+            terminalDiagnostic('connect-attempt', {cols:initialCols, rows:initialRows});
             const flowState = createTerminalFlowState();
+            activeFlowState = flowState;
             ws = socket;
             socket.binaryType = 'arraybuffer';
             lastResponseAt = Date.now();
+            // A socket that opens but never negotiates must fail visibly, not hang.
+            clearTimeout(connectDeadlineTimer);
+            connectDeadlineTimer = setTimeout(() => {
+                if (ws === socket && !transportReady) {
+                    try { socket.close(4000, 'Handshake timeout'); } catch (_) {}
+                }
+            }, TERMINAL_HANDSHAKE_TIMEOUT_MS);
 
             socket.onopen = () => {
                 if (ws !== socket) return;
+                terminalDiagnostic('open');
                 // Keep the last rendered screen visible until tmux redraws it.
                 lastResponseAt = Date.now();
                 scheduleResize();
@@ -1227,6 +1362,8 @@
                     if (msg.type === 'ready') {
                         flowState.enabled = msg.flow_version === TERMINAL_FLOW_VERSION;
                         transportReady = true;
+                        clearTimeout(connectDeadlineTimer);
+                        terminalDiagnostic('ready', {flow:flowState.enabled});
                     } else if (msg.type === 'pong') {
                         document.getElementById('status-latency').textContent = (Date.now() - lastPingTime) + 'ms';
                     } else if (msg.type === 'ended') {
@@ -1245,7 +1382,9 @@
             };
             socket.onclose = event => {
                 if (ws !== socket) return;
+                terminalDiagnostic('close', {code:event.code, reason:event.reason || ''});
                 ws = null;
+                clearTimeout(connectDeadlineTimer);
                 terminalReady = false;
                 transportReady = false;
                 const wasResyncRequested = flowState.resyncing;
@@ -1253,13 +1392,34 @@
                 flowState.resyncing = true;
                 flowState.queue.length = 0;
                 flowState.pendingBytes = 0;
-                const resyncing = wasResyncRequested || event.code === 1013 || event.code === 4000;
-                updateConnectionStatus(resyncing ? 'resyncing' : 'disconnected');
                 if (event.code === 1008) {
+                    if (event.reason === 'client-limit') {
+                        if (viewIsHidden()) {
+                            viewSuspended = true;
+                            reportTerminalState('suspended');
+                            return;
+                        }
+                        // Every view slot is taken; another tab may close soon.
+                        updateConnectionStatus('disconnected');
+                        reportTerminalState('reconnecting');
+                        reconnectAttempts++;
+                        const delay = Math.max(TERMINAL_CLIENT_LIMIT_FLOOR_MS,
+                            Math.min(1000 * 2 ** Math.min(reconnectAttempts - 1, 5), 30000)) + Math.random() * 500;
+                        scheduleConnect(delay);
+                        return;
+                    }
                     sessionEnded = true;
                     reportTerminalState('unavailable');
-                    showToast('Sesión no disponible o límite de conexiones alcanzado.');
+                    showToast('Sesión no disponible. Crea otra desde el panel.');
+                    return;
                 }
+                if (viewIsHidden()) {
+                    viewSuspended = true;
+                    reportTerminalState('suspended');
+                    return;
+                }
+                const resyncing = wasResyncRequested || event.code === 1013 || event.code === 4000;
+                updateConnectionStatus(resyncing ? 'resyncing' : 'disconnected');
                 if (!sessionEnded) {
                     reportTerminalState(resyncing ? 'resyncing' : 'reconnecting');
                     reconnectAttempts++;
@@ -1273,7 +1433,7 @@
                     } else {
                         delay = Math.min(1000 * 2 ** Math.min(reconnectAttempts - 1, 5), 30000) + Math.random() * 500;
                     }
-                    reconnectTimer = setTimeout(connect, delay);
+                    scheduleConnect(delay);
                 }
             };
             socket.onerror = () => {
@@ -1302,6 +1462,11 @@
                     indicator.style.background = '#9AA0A6';
                     label.textContent = 'Disconnected';
                     break;
+                case 'offline':
+                    badge.innerHTML = '<span class="dot"></span> Offline';
+                    indicator.style.background = '#9AA0A6';
+                    label.textContent = 'Offline';
+                    break;
                 case 'error':
                     badge.innerHTML = '<span class="dot"></span> Error';
                     indicator.style.background = '#EA4335';
@@ -1322,40 +1487,68 @@
 
         function checkConnection() {
             if (sessionEnded) return;
-            if (!ws || ws.readyState === WebSocket.CLOSED) {
-                connect();
+            if (navigator.onLine === false) {
+                updateConnectionStatus('offline');
+                reportTerminalState('offline');
                 return;
             }
-            if (Date.now() - lastResponseAt > 75000) {
+            if (!ws || ws.readyState === WebSocket.CLOSED) {
+                // An attempt is already armed; scheduling another would shorten
+                // the backoff the server asked us to respect.
+                if (!reconnectTimer) scheduleConnect(0);
+                return;
+            }
+            if (Date.now() - lastResponseAt > TERMINAL_STALE_AFTER_MS) {
                 // Invalidate stale handlers so an old socket cannot change the new one.
                 const stale = ws;
                 ws = null;
+                clearTimeout(connectDeadlineTimer);
                 stale.close();
-                connect();
+                scheduleConnect(0);
                 return;
             }
             if (ws.readyState === WebSocket.OPEN) {
                 lastPingTime = Date.now();
-                ws.send(JSON.stringify({type: 'ping'}));
+                try { ws.send(JSON.stringify({type: 'ping'})); } catch (_) {}
             }
         }
 
         document.addEventListener('DOMContentLoaded', () => {
-            connect();
+            scheduleConnect(0);
             heartbeatTimer = setInterval(checkConnection, 25000);
         });
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) {
+            if (viewIsHidden()) {
+                scheduleSuspend();
+            } else {
+                resumeView();
                 checkConnection();
                 scheduleResize();
             }
         });
-        window.addEventListener('online', checkConnection);
+        window.addEventListener('offline', () => {
+            updateConnectionStatus('offline');
+            reportTerminalState('offline');
+            terminalDiagnostic('offline');
+        });
+        window.addEventListener('online', () => {
+            if (!ws || ws.readyState === WebSocket.CLOSED) scheduleConnect(0, true);
+            else checkConnection();
+        });
         window.addEventListener('pageshow', event => {
-            if (event.persisted) checkConnection();
+            if (event.persisted) {
+                touchScroll = bindTouchScroll();
+                resumeView();
+                checkConnection();
+                scheduleResize();
+            }
         });
         window.addEventListener('pagehide', () => {
+            clearTimeout(suspendTimer);
+            suspendTimer = null;
             clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+            clearTimeout(connectDeadlineTimer);
             touchScroll.dispose();
             if (ws) {
                 const socket = ws;

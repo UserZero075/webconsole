@@ -346,6 +346,14 @@ function closeMobileDrawers(restoreFocus = false) {
     if (restoreFocus && trigger?.isConnected) trigger.focus({preventScroll:true});
 }
 
+function notifyTerminalFrameVisibility(frame, visible) {
+    // A hidden terminal must release its tmux attach instead of waiting for a
+    // render-lag watchdog to declare the view stale. The iframe cannot always
+    // observe its own display:none reliably, so the workspace tells it directly.
+    if (!frame?.contentWindow) return;
+    frame.contentWindow.postMessage({type:'webconsole:view-visibility', visible: Boolean(visible)}, window.location.origin);
+}
+
 function requestTerminalFrameResize(frame, delay = 50) {
     if (!frame?.contentWindow || frame.hidden || document.hidden) return;
     clearTimeout(terminalFrameResizeTimers.get(frame));
@@ -1029,6 +1037,7 @@ function setTerminalFrameStatus(sessionId, status) {
         connecting: ['Conectando con el agente', 'La sesión sigue activa mientras se establece la conexión.'],
         reconnecting: ['Reconectando', 'Conservamos la pantalla mientras se recupera la conexión.'],
         resyncing: ['Sincronizando la vista', 'Descartamos solo la salida atrasada de esta vista; la sesión sigue activa.'],
+        offline: ['Sin conexión de red', 'La terminal se reconectará cuando vuelva la red.'],
         error: ['Conexión inestable', 'Se volverá a intentar automáticamente.'],
         unavailable: ['Conexión no disponible', 'Revisa el límite de vistas y vuelve a intentarlo.'],
         ended: ['Sesión finalizada', 'El proceso terminó; no se iniciará de nuevo automáticamente.'],
@@ -1088,6 +1097,7 @@ function renderCenter() {
         disposeEditorView(); disposeMergeView();
         $('terminal-loading').hidden = true;
         frame.hidden = true; editor.hidden = true; welcome.hidden = false;
+        notifyTerminalFrameVisibility(frame, false);
         const project = selectedProject();
         if (!project) {
             $('welcome-title').textContent = 'Un proyecto, todos tus agentes.';
@@ -1111,10 +1121,12 @@ function renderCenter() {
         disposeEditorView(); disposeMergeView();
         editor.hidden = true;
         frame.hidden = false;
+        notifyTerminalFrameVisibility(frame, true);
         const session = sessionFor(tab.sessionId) || tab.session;
         if (!session?.token) {
             $('terminal-loading').hidden = true;
             frame.hidden = true; welcome.hidden = false;
+            notifyTerminalFrameVisibility(frame, false);
             $('welcome-title').textContent = 'No se puede recuperar esta terminal';
             $('welcome-copy').textContent = 'Actualiza las sesiones; no se ha detenido el proceso tmux.';
             return;
@@ -1142,6 +1154,7 @@ function renderCenter() {
         disposeMergeView();
         $('terminal-loading').hidden = true;
         frame.hidden = true;
+        notifyTerminalFrameVisibility(frame, false);
         editor.hidden = false;
         state.selectedSessionId = null;
         renderEditor(tab);
@@ -1151,6 +1164,7 @@ function renderCenter() {
         disposeEditorView();
         $('terminal-loading').hidden = true;
         frame.hidden = true;
+        notifyTerminalFrameVisibility(frame, false);
         editor.hidden = false;
         state.selectedSessionId = null;
         renderGitDiffTab(tab);
@@ -2950,6 +2964,10 @@ function attachEvents() {
     });
     updateMobileDrawerState();
     document.addEventListener('visibilitychange', () => {
+        // A backgrounded workspace tab must not keep a tmux attach alive while
+        // its renderer is throttled; the iframe cannot observe the parent tab.
+        const frame = $('terminal-frame');
+        if (frame && !frame.hidden) notifyTerminalFrameVisibility(frame, !document.hidden);
         clearTimeout(state.pollTimer);
         if (!document.hidden) refreshAll();
     });

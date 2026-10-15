@@ -156,6 +156,14 @@ desde un attach local, no se descarga entero en cada reconexión.
 
 La vista embebida muestra una carga oscura hasta que xterm confirma el primer render. En
 reconexiones conserva la pantalla anterior y presenta el estado sin vaciar el terminal.
+Una vista que permanece oculta durante 2 segundos libera su attach desechable; el proceso
+tmux sigue ejecutándose y, al volver a mostrarla, la pantalla actual se redibuja en un attach
+nuevo. Las vistas visibles conservan un límite de 4 segundos para detectar un render atascado;
+los envíos WebSocket tienen un timeout de E/S de 10 segundos. Si el navegador queda sin red,
+la vista espera al evento de recuperación de conectividad antes de volver a conectar.
+Para diagnóstico local opcional, añade `?diag=1` a la URL de terminal o activa
+`localStorage.setItem('webconsole.terminal.debug', '1')` en la consola del navegador. Solo se
+registran eventos de conexión, código de cierre y dimensiones; nunca tokens ni contenido terminal.
 Los recursos JS/CSS públicos se sirven comprimidos con gzip cuando el cliente lo acepta y usan
 versiones derivadas de su contenido para permitir caché larga sin conservar una UI antigua. La terminal
 mantiene el protocolo ANSI comprimido por bloques: WebConsole no elimina redibujados ni puede

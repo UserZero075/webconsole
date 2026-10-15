@@ -5,6 +5,7 @@ Minimal, Material You design, Google-style aesthetics
 
 from flask import Flask, render_template, request, jsonify, send_from_directory, abort, session, Response
 from flask_sock import Sock
+from simple_websocket import ConnectionClosed
 import os
 import uuid
 import json
@@ -48,6 +49,7 @@ from github_service import (GitHubError, status as github_status, repositories a
                             branches as github_branches, validate_public_url,
                             repository_permission, resolve_gh)
 from preferences import PreferencesError, PreferencesStore, DEFAULTS as PREFERENCE_DEFAULTS
+from log_safety import install_access_log_redaction
 
 app = Flask(__name__,
             static_folder=str(Path(__file__).parent.parent / 'static'),
@@ -64,6 +66,11 @@ app.config.update(
 
 sock = Sock(app)
 SERVER_STARTED_MONOTONIC = time.monotonic()
+
+# Werkzeug's access log prints request targets verbatim, including the bearer
+# token in /c/<token> and /ws/<id>?token=... Install once at import so tokens
+# never reach journald even when the dev server logs the request line.
+install_access_log_redaction('werkzeug')
 
 
 @lru_cache(maxsize=128)
@@ -439,6 +446,7 @@ TERMINAL_FLOW_FRAME_BYTES = 16 * 1024
 TERMINAL_FLOW_MAX_UNACKED_BYTES = 128 * 1024
 TERMINAL_FLOW_MAX_UNACKED_FRAMES = 32
 TERMINAL_FLOW_ACK_TIMEOUT = 4.0
+TERMINAL_SOCKET_IO_TIMEOUT_SECONDS = 10.0
 TERMINAL_PTY_COALESCE_SECONDS = 0.003
 TERMINAL_PTY_BATCH_BYTES = 64 * 1024
 TERMINAL_PTY_READ_BYTES = 8 * 1024
@@ -451,6 +459,42 @@ def enable_websocket_low_latency(ws):
         return True
     except (AttributeError, OSError, TypeError):
         # Some WSGI adapters expose a wrapped or non-TCP socket.
+        return False
+
+
+class SerializedWebSocketSocket:
+    """Make simple-websocket's concurrent frame writes complete and atomic.
+
+    simple-websocket 1.1.0 calls socket.send() directly from both the request
+    handler and its ping/receive thread, and ignores a short-write count. A
+    socket-like adapter serializes all writes and uses sendall() so frame bytes
+    cannot be truncated or interleaved. The underlying socket remains the same
+    descriptor; all other socket operations are delegated unchanged.
+    """
+
+    def __init__(self, sock):
+        self._sock = sock
+        self._send_lock = threading.Lock()
+
+    def send(self, data, *args, **kwargs):
+        with self._send_lock:
+            self._sock.sendall(data, *args, **kwargs)
+        return len(data)
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+def bound_websocket_io(ws):
+    """Bound socket sends so a stalled browser cannot pin a terminal slot forever.
+
+    The socket timeout also applies to its reader, which waits with a selector
+    before recv() when ping_interval is enabled (as configured for this app).
+    """
+    try:
+        ws.sock.settimeout(TERMINAL_SOCKET_IO_TIMEOUT_SECONDS)
+        return True
+    except (AttributeError, OSError, TypeError):
         return False
 
 
@@ -490,12 +534,30 @@ def encode_terminal_flow_frame(raw, sequence):
 @sock.route('/ws/<session_id>')
 def terminal_ws(ws, session_id):
     """Each browser attaches its own tmux client; tmux owns the persistent shell."""
+    # Short-lived diagnostic id. Session tokens and terminal content are never logged.
+    connection_id = uuid.uuid4().hex[:8]
+    connected_at = time.monotonic()
+    close_reason = 'handler-exit'
     with SESSIONS_LOCK:
         info = terminal_sessions.get(session_id)
         if not info or info.get('clients', 0) >= MAX_CLIENTS:
-            ws.close(reason=1008, message='Session unavailable or client limit reached')
+            # The browser only sees the close code, so the reason string carries
+            # whether this is a temporary capacity limit or an unknown session.
+            reason_text = 'client-limit' if info else 'session-unavailable'
+            app.logger.info('terminal ws=%s session=%s rejected reason=%s clients=%s',
+                            connection_id, session_id,
+                            'unknown-session' if not info else 'client-limit',
+                            0 if not info else info.get('clients', 0))
+            ws.close(reason=1008, message=reason_text)
             return
         info['clients'] = info.get('clients', 0) + 1
+        clients_seen = info['clients']
+    sent_bytes = 0
+    sent_frames = 0
+    app.logger.info('terminal ws=%s session=%s attach flow=%s clients=%s',
+                    connection_id, session_id, request.args.get('flow') == str(TERMINAL_FLOW_VERSION),
+                    clients_seen)
+    ws.sock = SerializedWebSocketSocket(ws.sock)
     if not enable_websocket_low_latency(ws):
         app.logger.debug('TCP_NODELAY is unavailable for terminal client %s', session_id)
     master_fd = slave_fd = None
@@ -513,9 +575,18 @@ def terminal_ws(ws, session_id):
         'lagged': False,
     }
 
+    def stop_reader():
+        stop.set()
+        with flow_condition:
+            flow_condition.notify_all()
+
     def safe_send(payload):
+        nonlocal sent_bytes, sent_frames
         with send_lock:
             ws.send(payload)
+        sent_frames += 1
+        if isinstance(payload, (bytes, bytearray)):
+            sent_bytes += len(payload)
 
     def write_input(raw):
         # Nonblocking PTYs can accept only part of a paste. Never discard its tail.
@@ -579,6 +650,7 @@ def terminal_ws(ws, session_id):
             return flow['lagged']
 
     def pty_reader():
+        nonlocal close_reason
         try:
             while not stop.is_set():
                 ready, _, _ = select.select([master_fd], [], [], 0.045)
@@ -587,19 +659,30 @@ def terminal_ws(ws, session_id):
                 buf, closed = read_pty_output_batch(master_fd)
                 if buf:
                     if not send_terminal_output(buf):
+                        close_reason = 'send-aborted'
                         break
                 if closed:
+                    close_reason = 'pty-closed'
                     stop.set()
                     break
+        except (ConnectionError, OSError) as error:
+            # A slow or vanished browser is normal; do not raise a stack trace for it.
+            close_reason = 'send-failed'
+            app.logger.debug('Terminal ws=%s session=%s output stopped: %s',
+                             connection_id, session_id, type(error).__name__)
         except Exception:
+            close_reason = 'reader-error'
             app.logger.debug('Terminal client disconnected', exc_info=True)
         finally:
-            stop.set()
+            stop_reader()
 
     reader = None
     try:
+        if not bound_websocket_io(ws):
+            app.logger.debug('WebSocket IO timeout is unavailable for terminal client %s', session_id)
         # Ended sessions are never silently replaced by another shell.
         if not session_alive(session_id):
+            close_reason = 'session-ended'
             safe_send(json.dumps({'type': 'ended'}))
             return
         master_fd, slave_fd = pty.openpty()
@@ -622,7 +705,8 @@ def terminal_ws(ws, session_id):
         while True:
             msg = ws.receive(timeout=0.5)
             if terminal_output_is_lagging():
-                stop.set()
+                close_reason = 'view-lagged'
+                stop_reader()
                 try:
                     with send_lock:
                         ws.close(reason=1013, message='Terminal view fell behind; reconnect to current screen')
@@ -630,6 +714,7 @@ def terminal_ws(ws, session_id):
                     pass
                 break
             if stop.is_set():
+                close_reason = 'pty-closed'
                 break
             if msg is None:
                 continue
@@ -659,16 +744,25 @@ def terminal_ws(ws, session_id):
                 sequence = data.get('seq')
                 if isinstance(sequence, str) and sequence.isascii() and sequence.isdecimal() and len(sequence) <= 20:
                     acknowledge_terminal_output(int(sequence))
+    except ConnectionClosed:
+        # The browser navigating away or losing the network is routine, not a failure.
+        close_reason = 'client-closed'
     except (ValueError, TypeError, OSError, subprocess.SubprocessError):
-        app.logger.exception('Terminal attach failed')
+        close_reason = 'attach-failed'
+        app.logger.exception('Terminal ws=%s session=%s attach failed', connection_id, session_id)
         try:
             safe_send(json.dumps({'type': 'error', 'data': 'Unable to attach to terminal. Check server logs.'}))
         except Exception:
             pass
+    except Exception:
+        close_reason = 'handler-error'
+        app.logger.exception('Terminal ws=%s session=%s handler failed', connection_id, session_id)
     finally:
-        stop.set()
+        stop_reader()
         if reader:
-            reader.join(timeout=1)
+            # Sends have a deadline above; wait long enough for the reader to
+            # leave its bounded send before closing/releasing the PTY descriptor.
+            reader.join(timeout=TERMINAL_SOCKET_IO_TIMEOUT_SECONDS + 1)
         if master_fd is not None:
             os.close(master_fd)
         if slave_fd is not None:
@@ -685,8 +779,15 @@ def terminal_ws(ws, session_id):
         with SESSIONS_LOCK:
             info['clients'] = max(0, info.get('clients', 1) - 1)
             info['last_active'] = time.time()
+            remaining_clients = info['clients']
             if terminal_sessions.get(session_id) is info:
                 persist_session(session_id, info)
+        # One line per attach/detach gives a baseline for disconnect diagnosis.
+        app.logger.info('terminal ws=%s session=%s detach reason=%s duration=%.1fs '
+                        'frames=%s bytes=%s remaining_clients=%s',
+                        connection_id, session_id, close_reason,
+                        time.monotonic() - connected_at, sent_frames, sent_bytes,
+                        remaining_clients)
 
 # Routes
 @app.route('/')

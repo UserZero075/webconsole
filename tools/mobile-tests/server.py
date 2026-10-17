@@ -11,6 +11,11 @@ from flask import Flask, jsonify, render_template, send_file
 ROOT = Path(__file__).resolve().parents[2]
 app = Flask(__name__, template_folder=str(ROOT / "templates"), static_folder=str(ROOT / "static"))
 app.jinja_env.globals["asset_version"] = lambda _path: "mobile-fixture"
+app.jinja_env.globals["preferences"] = {
+    "brand_name": "WebConsole fixture",
+    "accent_color": "#8acfb3",
+    "terminal_background": "#1a1a2e",
+}
 
 PROJECT = {"id": "p1", "name": "Mobile fixture", "path": "/fixture", "session_count": 0, "workspace_count": 1}
 GIT = {"is_git": False, "available": True, "branch": "main", "branches": [], "remotes": [], "changes": []}
@@ -35,6 +40,18 @@ def terminal_fixture():
     return send_file(ROOT / "tests/frontend/mobile/terminal-fixture.html", mimetype="text/html")
 
 
+@app.get("/c/fixture-token")
+def embedded_console_fixture():
+    return render_template(
+        "console.html", preferences={
+        "brand_name": "WebConsole fixture",
+        "accent_color": "#8acfb3",
+        "terminal_background": "#1a1a2e",
+        }, session_id="fixture-session", token="fixture-token",
+        session_role="agent", embedded=True,
+    )
+
+
 @app.get("/api/projects")
 def projects():
     return jsonify(projects=[PROJECT])
@@ -43,6 +60,15 @@ def projects():
 @app.get("/api/sessions")
 def sessions():
     return jsonify(sessions=[])
+
+
+@app.get("/api/preferences")
+def preferences():
+    return jsonify({
+        "brand_name": "WebConsole fixture",
+        "accent_color": "#8acfb3",
+        "terminal_background": "#1a1a2e",
+    })
 
 
 @app.get("/api/projects/p1/workspaces")

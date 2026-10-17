@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es" style="--bg-terminal: {{ preferences.terminal_background }}"{% if embedded %} class="embedded-terminal-document"{% endif %}>
+<html lang="es" style="--bg-terminal: {{ preferences.terminal_background }}; --console-accent: {{ preferences.accent_color }}"{% if embedded %} class="embedded-terminal-document"{% endif %}>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -73,11 +73,31 @@
         <!-- Terminal Container -->
         <div class="terminal-wrapper" id="terminal-wrapper">
             <div id="terminal"></div>
-            <div class="terminal-scroll-hint" id="terminal-scroll-hint" role="status" aria-live="polite" hidden></div>
             <div class="terminal-scroll-controls" id="terminal-scroll-controls" hidden>
                 <button type="button" id="terminal-scroll-to-end" aria-label="Volver al final de la salida local">Volver al final</button>
             </div>
         </div>
+
+        <section class="mobile-terminal-tools" id="mobile-terminal-tools" aria-label="Escritura para la terminal">
+            <details class="mobile-terminal-key-drawer">
+                <summary>Teclas</summary>
+                <div class="mobile-terminal-keys" role="group" aria-label="Teclas de control">
+                    <button type="button" data-terminal-key="escape" aria-label="Enviar Escape">Esc</button>
+                    <button type="button" data-terminal-key="tab" aria-label="Enviar Tab">Tab</button>
+                    <button type="button" data-terminal-key="up" aria-label="Enviar flecha arriba">↑</button>
+                    <button type="button" data-terminal-key="down" aria-label="Enviar flecha abajo">↓</button>
+                    <button type="button" data-terminal-key="interrupt" aria-label="Enviar Ctrl+C">Ctrl+C</button>
+                </div>
+            </details>
+            <label class="mobile-terminal-compose">
+                <span class="visually-hidden">Texto para la sesión activa</span>
+                <textarea id="mobile-terminal-draft" rows="1" maxlength="8192" enterkeyhint="enter"
+                          autocomplete="off" autocapitalize="off" spellcheck="false"
+                          placeholder="Escribe para esta sesión…" aria-label="Borrador para la terminal"></textarea>
+                <button type="button" id="mobile-terminal-send" disabled>Enviar</button>
+            </label>
+            <p class="mobile-terminal-note" id="mobile-terminal-note" role="status" aria-live="polite" hidden></p>
+        </section>
 
         <section class="attachment-transfer-panel" id="attachment-transfer-panel" hidden
                  role="region" aria-label="Progreso de archivos adjuntos">
@@ -166,6 +186,8 @@
         let lastSentDimensions = null;
         let lastPingTime = 0;
         let attachmentInputAllowed = !embedded && sessionRole !== 'workspace_shell';
+        let mobileTerminalInputAllowed = !embedded && sessionRole !== 'workspace_shell';
+        let pendingSidebarToggle = null;
         const TERMINAL_FLOW_VERSION = 1;
         const TERMINAL_RENDER_LAG_MS = 4000;
         const TERMINAL_RENDER_QUEUE_LIMIT = 128 * 1024;
@@ -277,31 +299,16 @@
         // Open terminal
         terminal.open(document.getElementById('terminal'));
 
-        const scrollHint = document.getElementById('terminal-scroll-hint');
         const scrollControls = document.getElementById('terminal-scroll-controls');
         function bindTouchScroll() {
-            return window.WebConsoleTerminalTouch.bind(terminal, state => {
-                updateTerminalScrollState(state === 'unsupported');
-            });
+            return window.WebConsoleTerminalTouch.bind(terminal, () => updateTerminalScrollState());
         }
         let touchScroll = bindTouchScroll();
 
-        function updateTerminalScrollState(showUnsupported = false) {
+        function updateTerminalScrollState() {
             const buffer = terminal.buffer.active;
             const normal = buffer.type === 'normal';
             scrollControls.hidden = !(normal && buffer.viewportY < buffer.baseY);
-
-            const coarsePointer = window.matchMedia?.('(pointer: coarse)').matches
-                || (navigator.maxTouchPoints || 0) > 0;
-            const mouseMode = terminal.modes.mouseTrackingMode;
-            const unsupported = showUnsupported || !['vt200', 'drag', 'any'].includes(mouseMode);
-            const shouldExplain = coarsePointer && (!normal || mouseMode !== 'none' || showUnsupported);
-            scrollHint.hidden = !shouldExplain;
-            if (shouldExplain) {
-                scrollHint.textContent = unsupported
-                    ? 'Esta pantalla no ofrece rueda verificable. Usa los controles propios de la TUI; WebConsole no enviará teclas.'
-                    : 'La TUI controla la rueda. El historial depende de su soporte; no es scrollback local.';
-            }
         }
 
         document.getElementById('terminal-scroll-to-end').addEventListener('click', () => {
@@ -380,11 +387,70 @@
             if (transportReady && ws && ws.readyState === WebSocket.OPEN) {
                 try {
                     ws.send(encoder.encode(data));
+                    return true;
                 } catch (_) {
-                    ws.send(JSON.stringify({ type: 'input', data: data }));
+                    try {
+                        ws.send(JSON.stringify({ type: 'input', data: data }));
+                        return true;
+                    } catch (_) { return false; }
                 }
             }
+            return false;
         }
+
+        const mobileDraft = document.getElementById('mobile-terminal-draft');
+        const mobileSend = document.getElementById('mobile-terminal-send');
+        const mobileNote = document.getElementById('mobile-terminal-note');
+        function updateMobileTerminalTools() {
+            if (!mobileDraft || !mobileSend) return;
+            mobileSend.disabled = !mobileDraft.value.length || !transportReady || !mobileTerminalInputAllowed || sessionEnded;
+            mobileDraft.disabled = !mobileTerminalInputAllowed || sessionEnded;
+            if (mobileNote) mobileNote.hidden = !mobileNote.textContent.trim();
+            for (const button of document.querySelectorAll('[data-terminal-key]')) {
+                button.disabled = !transportReady || !mobileTerminalInputAllowed || sessionEnded;
+            }
+        }
+        mobileDraft?.addEventListener('input', () => {
+            mobileDraft.style.height = 'auto';
+            mobileDraft.style.height = `${Math.min(mobileDraft.scrollHeight, 104)}px`;
+            updateMobileTerminalTools();
+            sendParentMessage({type:'webconsole:mobile-draft-state', session_id:sessionId, dirty:Boolean(mobileDraft.value)});
+        });
+        mobileDraft?.addEventListener('focus', () => sendParentMessage({
+            type:'webconsole:mobile-keyboard-state', session_id:sessionId, open:true,
+        }));
+        mobileDraft?.addEventListener('blur', () => sendParentMessage({
+            type:'webconsole:mobile-keyboard-state', session_id:sessionId, open:false,
+        }));
+        mobileSend?.addEventListener('click', () => {
+            if (!mobileDraft || mobileSend.disabled) return;
+            const value = mobileDraft.value;
+            // Explicit send only. Never retry this buffer after a disconnect;
+            // the user can inspect/re-send it if the remote result is uncertain.
+            if (!sendInput(value + '\r')) {
+                mobileNote.textContent = 'Sin conexión: el borrador se conserva y no se envió.';
+                updateMobileTerminalTools();
+                return;
+            }
+            mobileDraft.value = '';
+            mobileDraft.style.height = '';
+            sendParentMessage({type:'webconsole:mobile-draft-state', session_id:sessionId, dirty:false});
+            mobileNote.textContent = 'Enviado a la conexión activa; la entrega remota no puede confirmarse aquí.';
+            updateMobileTerminalTools();
+        });
+        const mobileTerminalKeys = {
+            escape:'\x1b', tab:'\t', up:'\x1b[A', down:'\x1b[B', interrupt:'\x03',
+        };
+        document.querySelectorAll('[data-terminal-key]').forEach(button => {
+            button.addEventListener('click', () => {
+                const key = mobileTerminalKeys[button.dataset.terminalKey];
+                if (!key || button.disabled) return;
+                if (!sendInput(key)) mobileNote.textContent = 'Sin conexión: la tecla no se envió.';
+                else mobileNote.textContent = `Tecla enviada: ${button.textContent.trim()}.`;
+                updateMobileTerminalTools();
+            });
+        });
+        updateMobileTerminalTools();
 
         function sendParentMessage(data) {
             if (embedded && window.parent !== window) window.parent.postMessage(data, window.location.origin);
@@ -750,6 +816,8 @@
             }
             if (event.data?.type === 'webconsole:session-state' && event.data.session_id === sessionId) {
                 attachmentInputAllowed = Boolean(event.data.input_allowed) && event.data.state !== 'permission';
+                mobileTerminalInputAllowed = Boolean(event.data.input_allowed) && event.data.state !== 'permission';
+                updateMobileTerminalTools();
                 return;
             }
             if (event.data?.type === 'webconsole:interrupt' && event.data.session_id === sessionId) {
@@ -770,8 +838,37 @@
                 scheduleResize();
                 return;
             }
-            const action = event.data?.type === 'webconsole:agent-action' && event.data.session_id === sessionId
-                ? event.data.action : '';
+            if (event.data?.type !== 'webconsole:agent-action' || event.data.session_id !== sessionId) return;
+            const action = event.data.action;
+            if (action === 'opencode-sidebar') {
+                const requestId = event.data.request_id;
+                const reportResult = success => sendParentMessage({
+                    type:'webconsole:action-result', action, session_id:sessionId, request_id:requestId, success,
+                });
+                const socket = ws;
+                const canSend = () => Boolean(embedded && sessionRole !== 'workspace_shell'
+                    && requestId && String(requestId).length <= 100
+                    && transportReady && socket && ws === socket && socket.readyState === WebSocket.OPEN
+                    && !sessionEnded && !viewSuspended && !viewIsHidden() && parentViewVisible
+                    && mobileTerminalInputAllowed);
+                if (pendingSidebarToggle) {
+                    if (pendingSidebarToggle.requestId !== requestId) reportResult(false);
+                    return;
+                }
+                if (!canSend() || !sendInput('\x18') || !canSend()) {
+                    reportResult(false);
+                    return;
+                }
+                const pending = {requestId, socket, timer:null};
+                pendingSidebarToggle = pending;
+                pending.timer = setTimeout(() => {
+                    if (pendingSidebarToggle !== pending) return;
+                    pendingSidebarToggle = null;
+                    const success = canSend() && sendInput('b') && ws === socket;
+                    reportResult(success);
+                }, 150);
+                return;
+            }
             const execute = agentActions[action];
             const success = Boolean(execute && transportReady && ws && ws.readyState === WebSocket.OPEN);
             if (success) execute();
@@ -1305,6 +1402,7 @@
             updateConnectionStatus('connecting');
             terminalReady = false;
             transportReady = false;
+            updateMobileTerminalTools();
             reportTerminalState(terminalHasRendered ? 'reconnecting' : 'connecting');
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const initialCols = Math.max(20, Math.min(500, dims.cols));
@@ -1366,12 +1464,15 @@
                     if (msg.type === 'ready') {
                         flowState.enabled = msg.flow_version === TERMINAL_FLOW_VERSION;
                         transportReady = true;
+                        updateMobileTerminalTools();
                         clearTimeout(connectDeadlineTimer);
                         terminalDiagnostic('ready', {flow:flowState.enabled});
                     } else if (msg.type === 'pong') {
                         document.getElementById('status-latency').textContent = (Date.now() - lastPingTime) + 'ms';
                     } else if (msg.type === 'ended') {
                         sessionEnded = true;
+                        mobileTerminalInputAllowed = false;
+                        updateMobileTerminalTools();
                         reportTerminalState('ended');
                         showToast('La sesión terminó. Crea otra desde el panel.');
                         socket.close();
@@ -1391,6 +1492,7 @@
                 clearTimeout(connectDeadlineTimer);
                 terminalReady = false;
                 transportReady = false;
+                updateMobileTerminalTools();
                 const wasResyncRequested = flowState.resyncing;
                 clearTimeout(flowState.lagTimer);
                 flowState.resyncing = true;

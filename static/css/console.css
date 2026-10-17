@@ -196,8 +196,7 @@ body.terminal-mode {
 .embedded-terminal .terminal-wrapper, .embedded-terminal #terminal {min-height: 0}
 html.embedded-terminal-document, html.embedded-terminal-document body,
 html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}
-.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal) !important; width: 100%}
-.embedded-terminal .xterm-screen {width: 100%; height: 100%; background: var(--bg-terminal)}
+.embedded-terminal .xterm-viewport {width: 100%}
 .embedded-terminal .xterm-screen canvas {max-width: none !important}
 /* Keep scrolling, but do not reserve a column of pixels beside the TUI. */
 .embedded-terminal .xterm-viewport {scrollbar-width: none}
@@ -381,6 +380,12 @@ html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .
     overflow: hidden;
 }
 
+.visually-hidden {
+    position:absolute!important; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
+}
+.mobile-terminal-tools {display:none}
+
 .local-input-composer.hidden {
     display: none;
 }
@@ -445,9 +450,9 @@ html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .
     padding: 8px;
 }
 .embedded-terminal .xterm {
-    height: calc(100% + 32px);
-    width: calc(100% + 32px);
-    margin: -16px;
+    height: 100%;
+    width: 100%;
+    margin: 0;
     padding: 0;
 }
 
@@ -473,23 +478,6 @@ html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .
 }
 
 .terminal-scroll-controls button:hover {background:#20352d}
-.terminal-scroll-hint {
-    position: absolute;
-    z-index: 7;
-    right: 12px;
-    bottom: 12px;
-    left: 12px;
-    width: fit-content;
-    max-width: min(560px, calc(100% - 24px));
-    padding: 7px 10px;
-    border: 1px solid #4b5147;
-    border-radius: 5px;
-    background: #121916ed;
-    color: #d5d9cc;
-    font-size: 11px;
-    line-height: 1.45;
-    pointer-events: none;
-}
 
 .xterm-viewport::-webkit-scrollbar {
     width: 10px;
@@ -643,4 +631,33 @@ html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .
     .local-input-hint {
         display: none;
     }
+
+    html.embedded-terminal-document .mobile-terminal-tools {
+        display:flex; flex:0 0 auto; flex-direction:column; gap:4px;
+        padding:4px 9px max(4px, env(safe-area-inset-bottom));
+        border-top:1px solid #292d32; background:#111417;
+    }
+    .mobile-terminal-key-drawer {order:0; min-height:22px; color:var(--text-secondary)}
+    .mobile-terminal-key-drawer summary {width:max-content; min-height:22px; padding:2px 3px; cursor:pointer; font-size:11px; list-style:none; touch-action:manipulation}
+    .mobile-terminal-key-drawer summary::-webkit-details-marker {display:none}
+    .mobile-terminal-key-drawer summary::before {display:inline-block; width:16px; content:"＋"; color:var(--console-accent); font-size:13px}
+    .mobile-terminal-key-drawer[open] summary::before {content:"−"}
+    .mobile-terminal-keys {display:flex; gap:5px; overflow-x:auto; padding:4px 0 2px; scrollbar-width:none; touch-action:pan-x}
+    .mobile-terminal-keys::-webkit-scrollbar {display:none}
+    .mobile-terminal-keys button {
+        min-width:42px; min-height:36px; padding:0 10px; border:1px solid #30353a; border-radius:4px;
+        background:#1a1e22; color:#d8dcdf; font-size:12px; touch-action:manipulation;
+    }
+    .mobile-terminal-keys button:disabled {opacity:.45}
+    .mobile-terminal-compose {display:flex; align-items:stretch; gap:7px; min-height:46px}
+    .mobile-terminal-compose textarea {
+        width:100%; min-width:0; min-height:46px; max-height:104px; resize:none;
+        border:1px solid #30353a; border-radius:4px; padding:11px 10px;
+        background:#171a1e; color:var(--text-primary); font:16px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    }
+    .mobile-terminal-compose textarea:focus {outline:2px solid color-mix(in srgb,var(--console-accent) 70%,transparent); outline-offset:1px; border-color:var(--console-accent)}
+    .mobile-terminal-compose button {min-width:66px; min-height:46px; padding:0 12px; border:0; border-radius:4px; background:var(--console-accent); color:#171a1e; font-weight:650; font-size:13px}
+    .mobile-terminal-compose button:disabled {background:#2a2e32; color:#858b90; opacity:1}
+    .mobile-terminal-note {margin:1px 1px 0; color:#a4aaa6; font-size:10px; line-height:1.35}
+    .mobile-terminal-tools:has(.mobile-terminal-compose textarea:focus) .mobile-terminal-key-drawer {display:none}
 }

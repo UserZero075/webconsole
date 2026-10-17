@@ -51,6 +51,7 @@ a {color:inherit; text-decoration:none}
 .project-sidebar {display:flex; flex-direction:column; border-right:1px solid var(--line)}
 .sidebar-heading,.inspector-heading {height:39px; flex:0 0 39px; display:flex; align-items:center; justify-content:space-between; padding:0 13px; color:#d3d4d1; font-size:12px; font-weight:690}
 .sidebar-heading {padding-left:15px}
+.sidebar-heading-actions {display:flex; align-items:center; gap:3px}
 .mini-button,.square-button {display:inline-grid; place-items:center; border:0; background:transparent; color:var(--muted); border-radius:5px; width:27px; height:27px; font-size:17px; line-height:1}
 .mini-button:hover,.square-button:hover:not(:disabled) {background:var(--panel-hover); color:var(--text)}
 .project-search,.file-search {margin:0 10px 9px; height:29px; display:flex; align-items:center; gap:7px; padding:0 8px; border:1px solid #2a2c30; border-radius:5px; background:#121315; color:var(--quiet)}
@@ -510,4 +511,130 @@ a {color:inherit; text-decoration:none}
     .mobile-nav-button {padding-inline:5px; font-size:9px}
     .terminal-drawer-actions {max-width:46%}
     .toolbar-actions select {width:88px; min-width:88px}
+}
+
+/* Mobile workspace: one useful surface at a time, without shrinking desktop panels. */
+.mobile-workspace-nav {display:none}
+.mobile-shell-open {display:none}
+@media (max-width:650px) {
+    .mobile-workspace-nav {
+        position:fixed; z-index:7; right:0; bottom:0; left:0;
+        height:calc(58px + env(safe-area-inset-bottom));
+        display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+        padding:4px 5px env(safe-area-inset-bottom);
+        border-top:1px solid var(--line); background:#17181a;
+    }
+    .mobile-workspace-nav button {
+        min-width:0; min-height:48px; display:flex; flex-direction:column;
+        align-items:center; justify-content:center; gap:2px;
+        border:0; border-radius:6px; background:transparent; color:var(--muted);
+        font-size:10px; touch-action:manipulation;
+    }
+    .mobile-workspace-nav button span:first-child {font-size:15px; line-height:1}
+    .mobile-workspace-nav button[aria-current="page"] {color:var(--accent); background:var(--accent-faint)}
+    .workbench {height:calc(var(--webconsole-visible-height, 100dvh) - var(--workspace-topbar-height) - 58px - env(safe-area-inset-bottom))}
+    .bottom-status {display:none}
+    .topbar #toggle-inspector {display:none}
+    .topbar #add-project {display:none}
+    .sidebar-heading-actions {display:flex; align-items:center; gap:4px}
+    .sidebar-heading-actions .mini-button {width:40px; height:40px}
+
+    body.mobile-surface-agents .inspector,
+    body.mobile-surface-files:not(.mobile-files-browser) .inspector {display:none}
+    body.mobile-surface-files.mobile-files-browser .center-pane,
+    body.mobile-surface-git .center-pane,
+    body.mobile-surface-messages .center-pane {display:none}
+    body.mobile-surface-files.mobile-files-browser .inspector,
+    body.mobile-surface-git .inspector,
+    body.mobile-surface-messages .inspector {
+        position:fixed; z-index:4; top:var(--workspace-topbar-height); right:0;
+        bottom:calc(58px + env(safe-area-inset-bottom)); left:0; width:auto;
+        display:flex; transform:none; border:0; box-shadow:none;
+        padding-bottom:env(safe-area-inset-bottom);
+    }
+    body.mobile-surface-files.mobile-files-browser .inspector .git-section,
+    body.mobile-surface-files.mobile-files-browser .inspector .message-section,
+    body.mobile-surface-git .inspector .explorer-section,
+    body.mobile-surface-git .inspector .message-section,
+    body.mobile-surface-messages .inspector .explorer-section,
+    body.mobile-surface-messages .inspector .git-section {display:none}
+    body.mobile-surface-files.mobile-files-browser .inspector .explorer-section,
+    body.mobile-surface-git .inspector .git-section,
+    body.mobile-surface-messages .inspector .message-section {
+        width:100%; height:100%; min-height:0; flex:1; border:0;
+    }
+    body.mobile-surface-files:not(.mobile-files-browser) .center-pane {grid-column:1; grid-row:1}
+    body.mobile-surface-files:not(.mobile-files-browser) .workspace-terminal {display:none}
+    body.mobile-surface-files:not(.mobile-files-browser) .pane-toolbar {display:none}
+    body.mobile-surface-files:not(.mobile-files-browser) .tab-strip {height:36px; flex-basis:36px}
+    body.mobile-surface-files:not(.mobile-files-browser) .editor-view {inset:0}
+    body.mobile-surface-files:not(.mobile-files-browser) .editor-toolbar {min-height:52px; height:auto; flex-basis:auto}
+    body.mobile-surface-files:not(.mobile-files-browser) .editor-toolbar strong {font-size:12px}
+    body.mobile-surface-files:not(.mobile-files-browser) .save-button {min-height:44px; font-size:12px}
+    body.mobile-surface-files.mobile-files-browser .explorer-section {height:100%; min-height:0}
+    body.mobile-surface-git .git-section {height:100%; min-height:0}
+    body.mobile-surface-messages .message-section {height:100%; min-height:0}
+    .topbar {padding-right:5px}
+    .topbar .top-actions {gap:2px}
+    .project-search input,.file-search input,.message-form input,
+    .toolbar-actions select,.git-tools select {font-size:16px}
+    .project-tree,.file-tree,.git-changes,.message-feed {overscroll-behavior:contain; -webkit-overflow-scrolling:touch}
+    .message-form {padding-bottom:max(8px, env(safe-area-inset-bottom))}
+    body.mobile-surface-git .git-tools .text-button,
+    body.mobile-surface-git .git-tools select {min-height:44px}
+    body.mobile-surface-messages .message-form button {min-height:44px}
+}
+
+/* Mobile terminal workspace: calm the chrome and keep the shell opt-in. */
+@media (max-width:650px) {
+    .topbar {height:var(--workspace-topbar-height); min-height:var(--workspace-topbar-height); padding:env(safe-area-inset-top) 10px 0; gap:10px; background:#151618}
+    .brand {flex:0 1 auto; min-width:0; gap:7px; font-size:13px; font-weight:650}
+    .brand-mark {width:25px; height:25px; flex:0 0 25px}
+    .brand>span:not(.brand-mark) {display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+    .top-separator,.top-context span:last-child,.quiet-link {display:none}
+    .top-context {display:block; min-width:0; max-width:32vw; flex:1 1 auto; margin-left:auto}
+    .top-context span:first-child {display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#b9bcb8; font-size:11px}
+    .top-actions {gap:4px; flex:0 0 auto}
+    .mobile-nav-button {display:inline-grid; place-items:center; width:40px; min-width:40px; min-height:40px; padding:0; overflow:hidden; font-size:0}
+    #toggle-projects::before {content:"☰"; font-size:17px}
+    .top-button {min-height:40px; padding:0 10px; font-size:11px}
+    #open-preferences {width:40px; min-width:40px; padding:0}
+    #add-project {display:none}
+    #add-agent {width:40px; min-width:40px; height:40px; padding:0; gap:0; border-radius:7px; font-size:20px}
+    .top-button-label {display:none}
+
+    .pane-toolbar {height:48px; min-height:48px; flex:0 0 48px; gap:8px; padding:0 10px; background:#18191b}
+    .work-title {min-width:0; flex:1 1 auto; display:block; overflow:hidden}
+    .work-title strong {display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; line-height:1.2}
+    .work-title span {display:none}
+    .toolbar-actions {gap:5px; flex:0 0 auto}
+    .toolbar-actions select {width:min(34vw,132px); min-width:92px; height:38px; border-radius:5px; font-size:12px}
+    .toolbar-actions #new-worktree {display:none}
+    .toolbar-actions #mobile-shell-open {display:inline-flex; min-height:38px; height:38px; align-items:center; justify-content:center; padding:0 10px; border-radius:5px; font-size:11px}
+    .toolbar-actions #interrupt-agent {width:38px; min-width:38px; height:38px; min-height:38px; padding:0; overflow:hidden; border-radius:5px; font-size:0}
+    .toolbar-actions #interrupt-agent::after {content:"Ⅱ"; font-size:14px}
+    .tab-strip {height:40px; flex:0 0 40px; background:#111214}
+    .tab {height:40px; min-width:0; max-width:48vw; flex:0 0 auto}
+    .tab-open {min-width:0; padding:0 10px; font-size:12px}
+    .tab-close {width:34px; height:36px; flex-basis:34px}
+    .workspace-terminal:not(.expanded) {display:none}
+    .workspace-terminal.expanded {display:flex; height:36dvh; max-height:280px; min-height:150px; flex:0 0 min(36dvh,280px); border-top:1px solid #343639}
+    .workspace-terminal.expanded .terminal-resize {height:14px; flex-basis:14px; background:#151618}
+    .workspace-terminal.expanded .terminal-resize::after {height:3px; width:34px; background:#686c6b}
+    .terminal-drawer-header {height:38px; min-height:38px; flex-basis:38px; padding:0 8px; gap:8px}
+    .terminal-drawer-toggle {height:38px; min-height:38px; gap:6px}
+    .terminal-drawer-toggle strong {font-size:11px}
+    .terminal-state {font-size:10px}
+    .terminal-context,.terminal-drawer-actions #shell-interrupt {display:none}
+    .terminal-drawer-actions {max-width:none; margin-left:auto}
+    .terminal-drawer-actions #workspace-attach {height:34px; min-height:34px; font-size:10px}
+    .bottom-status {display:none}
+
+    .mobile-workspace-nav {height:calc(54px + env(safe-area-inset-bottom)); padding:3px 8px env(safe-area-inset-bottom); border-top-color:#292b2e; background:#151618}
+    .mobile-workspace-nav button {gap:3px; border-radius:5px; color:#929692; font-weight:500}
+    .mobile-workspace-nav button span:first-child {font-size:14px; opacity:.85}
+    .mobile-workspace-nav button[aria-current="page"] {color:var(--accent); background:transparent; box-shadow:inset 0 -2px var(--accent)}
+    .workbench {height:calc(var(--webconsole-visible-height, 100dvh) - var(--workspace-topbar-height) - 54px - env(safe-area-inset-bottom))}
+    body.mobile-keyboard-open .mobile-workspace-nav {display:none}
+    body.mobile-keyboard-open .workbench {height:calc(var(--webconsole-visible-height, 100dvh) - var(--workspace-topbar-height))}
 }

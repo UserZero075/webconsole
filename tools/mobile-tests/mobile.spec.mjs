@@ -81,13 +81,12 @@ test('workspace drawers close by backdrop/Escape and never focus the terminal', 
   await expect(page.locator('#project-sidebar')).not.toHaveClass(/open/);
   expect(await page.evaluate(() => document.activeElement.id)).toBe('toggle-projects');
 
-  await page.locator('#toggle-inspector').click();
-  await expect(page.locator('#mobile-drawer-backdrop')).toBeVisible();
-  expect(await page.evaluate(() => document.body.classList.contains('inspector-open'))).toBe(true);
-  expect(await page.evaluate(() => document.activeElement.id)).toBe('inspector');
+  await page.locator('[data-mobile-surface="files"]').click();
+  await expect(page.locator('.explorer-section')).toBeVisible();
+  await expect(page.locator('.message-section')).toBeHidden();
+  expect(await page.evaluate(() => document.activeElement.dataset.mobileSurface)).toBe('files');
   await page.keyboard.press('Escape');
-  await expect(page.locator('#toggle-inspector')).toHaveAttribute('aria-expanded', 'false');
-  expect(await page.evaluate(() => document.activeElement.id)).toBe('toggle-inspector');
+  expect(await page.evaluate(() => document.activeElement.id)).not.toMatch(/terminal-frame|shell-frame/);
 });
 
 test('320px workspace has no horizontal page overflow and keeps essential hit targets', async ({page}) => {
@@ -99,7 +98,7 @@ test('320px workspace has no horizontal page overflow and keeps essential hit ta
       viewport: document.documentElement.clientWidth,
       page: document.documentElement.scrollWidth,
       projects: document.querySelector('#toggle-projects').getBoundingClientRect().height,
-      files: document.querySelector('#toggle-inspector').getBoundingClientRect().height,
+    files: document.querySelector('[data-mobile-surface="files"]').getBoundingClientRect().height,
     }));
     expect(metrics.page).toBeLessThanOrEqual(metrics.viewport);
     expect(metrics.projects).toBeGreaterThanOrEqual(40);
@@ -111,7 +110,7 @@ test('shell drawer separator can be resized without creating a terminal', async 
   await page.setViewportSize({width: 390, height: 844});
   await page.goto('/');
   await expect(page.locator('#terminal-drawer-toggle')).toBeEnabled();
-  await page.locator('#terminal-drawer-toggle').click();
+  await page.locator('#mobile-shell-open').click();
   const separator = page.locator('#terminal-resize');
   await expect(separator).toBeVisible();
   const before = await page.locator('#workspace-terminal').evaluate(element => element.getBoundingClientRect().height);
@@ -141,4 +140,58 @@ test('mobile viewport CSS receives orientation and visible-height changes', asyn
     inner: window.innerHeight,
   }));
   expect(Math.abs(landscapeHeight.visible - landscapeHeight.inner)).toBeLessThanOrEqual(1);
+});
+
+test('mobile navigation gives Git and messages a full-height surface', async ({page}) => {
+  await page.setViewportSize({width:390, height:844});
+  await page.goto('/');
+  await expect(page.locator('#mobile-workspace-nav')).toBeVisible();
+  await expect(page.locator('[data-mobile-surface="agents"]')).toHaveAttribute('aria-current', 'page');
+
+  await page.locator('[data-mobile-surface="git"]').click();
+  await expect(page.locator('body')).toHaveClass(/mobile-surface-git/);
+  await expect(page.locator('.git-section')).toBeVisible();
+  await expect(page.locator('.explorer-section')).toBeHidden();
+
+  await page.locator('[data-mobile-surface="messages"]').click();
+  await expect(page.locator('body')).toHaveClass(/mobile-surface-messages/);
+  await expect(page.locator('.message-section')).toBeVisible();
+  await expect(page.locator('.git-section')).toBeHidden();
+
+  await page.locator('[data-mobile-surface="files"]').click();
+  await expect(page.locator('body')).toHaveClass(/mobile-files-browser/);
+  await expect(page.locator('.explorer-section')).toBeVisible();
+  await expect(page.locator('.message-section')).toBeHidden();
+});
+
+test('opening a file transitions from the file browser to its editor surface', async ({page}) => {
+  await page.setViewportSize({width:390, height:844});
+  await page.goto('/');
+  await page.locator('[data-mobile-surface="files"]').click();
+  await expect(page.locator('.file-entry.file')).toBeVisible();
+  await page.locator('.file-entry.file').click();
+  await expect(page.locator('body')).toHaveClass(/mobile-surface-files/);
+  await expect(page.locator('body')).not.toHaveClass(/mobile-files-browser/);
+  await expect(page.locator('.editor-view')).toBeVisible();
+  await expect(page.locator('.inspector')).toBeHidden();
+});
+
+test('embedded terminal offers an explicit mobile draft without making typing live', async ({page}) => {
+  await page.setViewportSize({width:390, height:844});
+  await page.goto('/c/fixture-token');
+  const draft = page.locator('#mobile-terminal-draft');
+  const send = page.locator('#mobile-terminal-send');
+  await expect(page.locator('#mobile-terminal-tools')).toBeVisible();
+  await expect(draft).toBeVisible();
+  await expect(send).toBeDisabled();
+  await expect(page.locator('.mobile-terminal-key-drawer')).not.toHaveAttribute('open', '');
+  await expect(page.locator('#mobile-terminal-note')).toBeHidden();
+  expect(await draft.evaluate(element => getComputedStyle(element).fontSize)).toBe('16px');
+  await page.evaluate(() => window.dispatchEvent(new MessageEvent('message', {
+    origin:location.origin, source:window.parent,
+    data:{type:'webconsole:session-state', session_id:'fixture-session', input_allowed:true, state:'working'},
+  })));
+  await draft.fill('texto aún no enviado');
+  await expect(send).toBeDisabled();
+  await expect(page.locator('#mobile-terminal-note')).toBeHidden();
 });

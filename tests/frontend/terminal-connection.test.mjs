@@ -6,7 +6,7 @@ import vm from 'node:vm';
 const TEMPLATE = new URL('../../templates/console.html', import.meta.url);
 
 /** Strip Jinja placeholders so the inline script becomes parseable JavaScript. */
-async function loadSource() {
+async function loadSource({sessionRole = 'workspace_shell'} = {}) {
   const html = await readFile(TEMPLATE, 'utf8');
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
   return script
@@ -14,7 +14,7 @@ async function loadSource() {
     .replaceAll(/\{\{\s*asset_version\([^}]*\)\s*\}\}/g, '"0"')
     .replaceAll(/\{\{\s*session_id\s*\|\s*tojson\s*\}\}/g, '"sess-1"')
     .replaceAll(/\{\{\s*token\s*\|\s*tojson\s*\}\}/g, '"tok-1"')
-    .replaceAll(/\{\{\s*session_role\s*\|\s*tojson\s*\}\}/g, '"workspace_shell"')
+    .replaceAll(/\{\{\s*session_role\s*\|\s*tojson\s*\}\}/g, JSON.stringify(sessionRole))
     .replaceAll(/\{\{\s*embedded\s*\|\s*tojson\s*\}\}/g, 'true');
 }
 
@@ -23,6 +23,7 @@ function makeElement() {
   const listeners = {};
   return {
     hidden: false,
+    value: '',
     textContent: '',
     innerHTML: '',
     style: {},
@@ -134,8 +135,8 @@ class FakeWebSocket {
   }
 }
 
-async function buildContext({embedded = true} = {}) {
-  const source = await loadSource();
+async function buildContext({embedded = true, sessionRole = 'workspace_shell'} = {}) {
+  const source = await loadSource({sessionRole});
   const clock = makeClock();
   FakeWebSocket.instances.length = 0;
 
@@ -534,6 +535,37 @@ test('an inactive agent tab releases its attach immediately', async () => {
   assert.equal(FakeWebSocket.instances.length, 1, 'suspended tab sends and receives no reconnect traffic');
 });
 
+test('mobile draft sends only on explicit tap and is never replayed after disconnect', async () => {
+  const {context, clock, windowListeners, elements} = await buildContext({embedded:true});
+  const parent = context.window.parent;
+  fire(windowListeners, 'message', {
+    origin:'https://example.test', source:parent,
+    data:{type:'webconsole:session-state', session_id:'sess-1', input_allowed:true, state:'working'},
+  });
+  const socket = connectNow(context, clock);
+  socket.accept();
+  socket.deliver({type:'ready', flow_version:1});
+
+  const draft = elements.get('mobile-terminal-draft');
+  const send = elements.get('mobile-terminal-send');
+  draft.value = 'echo móvil';
+  fire(draft.listeners, 'input');
+  assert.equal(socket.sent.length, 0, 'typing never sends keystrokes');
+  assert.equal(send.disabled, false);
+
+  fire(send.listeners, 'click');
+  assert.equal(socket.sent.length, 1, 'explicit send emits one frame');
+  assert.equal(new TextDecoder().decode(socket.sent[0]), 'echo móvil\r');
+  assert.equal(draft.value, '');
+
+  draft.value = 'not replayed';
+  fire(draft.listeners, 'input');
+  socket.drop();
+  clock.advance(5000);
+  assert.equal(draft.value, 'not replayed', 'the unsubmitted draft stays visible');
+  assert.equal(socket.sent.length, 1, 'disconnect does not replay input');
+});
+
 test('a message from another origin cannot suspend the terminal', async () => {
   const {context, clock, windowListeners} = await buildContext();
   const socket = connectNow(context, clock);
@@ -548,6 +580,148 @@ test('a message from another origin cannot suspend the terminal', async () => {
   clock.advance(3000);
   assert.equal(vm.runInContext('viewSuspended', context), false, 'cross-origin message ignored');
   assert.equal(socket.readyState, FakeWebSocket.OPEN, 'attach untouched');
+});
+
+function sendSidebarAction(windowListeners, parent, requestId = 'sidebar-test-1', sessionId = 'sess-1') {
+  fire(windowListeners, 'message', {
+    origin:'https://example.test', source:parent,
+    data:{type:'webconsole:agent-action', action:'opencode-sidebar', session_id:sessionId, request_id:requestId},
+  });
+}
+
+function allowAgentInput(windowListeners, parent, inputAllowed = true, sessionId = 'sess-1') {
+  fire(windowListeners, 'message', {
+    origin:'https://example.test', source:parent,
+    data:{type:'webconsole:session-state', session_id:sessionId, input_allowed:inputAllowed, state:inputAllowed ? 'working' : 'permission'},
+  });
+}
+
+test('OpenCode sidebar action sends Ctrl+X then b once and confirms only after both bytes', async () => {
+  const {context, clock, windowListeners, parentMessages} = await buildContext({embedded:true, sessionRole:'agent'});
+  const parent = context.window.parent;
+  allowAgentInput(windowListeners, parent);
+  const socket = connectNow(context, clock);
+  socket.accept();
+  socket.deliver({type:'ready', flow_version:1});
+  socket.sent.length = 0;
+
+  sendSidebarAction(windowListeners, parent);
+  assert.deepEqual([...new TextDecoder().decode(socket.sent[0])], ['\x18']);
+  assert.equal(socket.sent.length, 1, 'the leader is the only byte sent immediately');
+  assert.equal(parentMessages.some(message => message.type === 'webconsole:action-result'), false, 'no early success ACK');
+  sendSidebarAction(windowListeners, parent);
+  assert.equal(socket.sent.length, 1, 'a duplicate request cannot interleave or repeat the leader');
+
+  clock.advance(149);
+  assert.equal(socket.sent.length, 1, 'the second key waits for the leader sequence');
+  clock.advance(1);
+  assert.equal(socket.sent.length, 2);
+  assert.equal(new TextDecoder().decode(socket.sent[1]), 'b');
+  const result = parentMessages.filter(message => message.type === 'webconsole:action-result').at(-1);
+  assert.equal(result.type, 'webconsole:action-result');
+  assert.equal(result.action, 'opencode-sidebar');
+  assert.equal(result.session_id, 'sess-1');
+  assert.equal(result.request_id, 'sidebar-test-1');
+  assert.equal(result.success, true);
+});
+
+test('OpenCode sidebar action is rejected while disconnected, ended, or awaiting permission', async () => {
+  for (const setup of ['permission', 'disconnected', 'ended']) {
+    const {context, clock, windowListeners, parentMessages} = await buildContext({embedded:true, sessionRole:'agent'});
+    const parent = context.window.parent;
+    allowAgentInput(windowListeners, parent, setup !== 'permission');
+    const socket = connectNow(context, clock);
+    if (setup !== 'disconnected') {
+      socket.accept();
+      socket.deliver({type:'ready', flow_version:1});
+    }
+    if (setup === 'ended') vm.runInContext('sessionEnded = true', context);
+    socket.sent.length = 0;
+
+    sendSidebarAction(windowListeners, parent, `request-${setup}`);
+    assert.equal(socket.sent.length, 0, `${setup}: no key bytes sent`);
+    assert.equal(parentMessages.at(-1).success, false, `${setup}: failure reported`);
+  }
+});
+
+test('OpenCode sidebar action is rejected outside an embedded agent or from a non-parent message', async () => {
+  const workspaceShell = await buildContext({embedded:true, sessionRole:'workspace_shell'});
+  allowAgentInput(workspaceShell.windowListeners, workspaceShell.context.window.parent);
+  const shellSocket = connectNow(workspaceShell.context, workspaceShell.clock);
+  shellSocket.accept();
+  shellSocket.deliver({type:'ready', flow_version:1});
+  shellSocket.sent.length = 0;
+  sendSidebarAction(workspaceShell.windowListeners, workspaceShell.context.window.parent);
+  assert.equal(shellSocket.sent.length, 0, 'workspace shell cannot receive agent-only action');
+  assert.equal(workspaceShell.parentMessages.at(-1).success, false);
+
+  const agent = await buildContext({embedded:true, sessionRole:'agent'});
+  allowAgentInput(agent.windowListeners, agent.context.window.parent);
+  const socket = connectNow(agent.context, agent.clock);
+  socket.accept();
+  socket.deliver({type:'ready', flow_version:1});
+  socket.sent.length = 0;
+  fire(agent.windowListeners, 'message', {
+    origin:'https://evil.example', source:agent.context.window.parent,
+    data:{type:'webconsole:agent-action', action:'opencode-sidebar', session_id:'sess-1', request_id:'forged-origin'},
+  });
+  fire(agent.windowListeners, 'message', {
+    origin:'https://example.test', source:{},
+    data:{type:'webconsole:agent-action', action:'opencode-sidebar', session_id:'sess-1', request_id:'forged-source'},
+  });
+  fire(agent.windowListeners, 'message', {
+    origin:'https://example.test', source:agent.context.window.parent,
+    data:{type:'webconsole:agent-action', action:'opencode-sidebar', session_id:'another-session', request_id:'wrong-session'},
+  });
+  agent.clock.advance(500);
+  assert.equal(socket.sent.length, 0, 'cross-origin/non-parent requests send no bytes');
+  assert.equal(agent.parentMessages.some(message => message.type === 'webconsole:action-result'
+    && message.action === 'opencode-sidebar'), false);
+});
+
+test('OpenCode sidebar action cancels its second key after a socket drop and never replays it', async () => {
+  const {context, clock, windowListeners, parentMessages} = await buildContext({embedded:true, sessionRole:'agent'});
+  const parent = context.window.parent;
+  allowAgentInput(windowListeners, parent);
+  const firstSocket = connectNow(context, clock);
+  firstSocket.accept();
+  firstSocket.deliver({type:'ready', flow_version:1});
+  firstSocket.sent.length = 0;
+
+  sendSidebarAction(windowListeners, parent);
+  assert.equal(new TextDecoder().decode(firstSocket.sent[0]), '\x18');
+  firstSocket.drop();
+  clock.advance(150);
+  assert.equal(firstSocket.sent.length, 1, 'no b on the dropped socket');
+  assert.equal(parentMessages.at(-1).success, false, 'partial sequence reported as incomplete');
+
+  clock.advance(1000);
+  const reconnectedSocket = FakeWebSocket.instances.at(-1);
+  assert.notEqual(reconnectedSocket, firstSocket);
+  reconnectedSocket.accept();
+  reconnectedSocket.deliver({type:'ready', flow_version:1});
+  clock.advance(1000);
+  assert.equal(reconnectedSocket.sent.some(payload => payload instanceof Uint8Array
+    && new TextDecoder().decode(payload) === 'b'), false, 'the second key is never replayed after reconnect');
+});
+
+test('OpenCode sidebar action cancels its second key when the parent immediately suspends the view', async () => {
+  const {context, clock, windowListeners, parentMessages} = await buildContext({embedded:true, sessionRole:'agent'});
+  const parent = context.window.parent;
+  allowAgentInput(windowListeners, parent);
+  const socket = connectNow(context, clock);
+  socket.accept();
+  socket.deliver({type:'ready', flow_version:1});
+  socket.sent.length = 0;
+
+  sendSidebarAction(windowListeners, parent);
+  fire(windowListeners, 'message', {
+    origin:'https://example.test', source:parent,
+    data:{type:'webconsole:view-visibility', visible:false, immediate:true},
+  });
+  clock.advance(150);
+  assert.equal(socket.sent.length, 1, 'view suspension cancels b');
+  assert.equal(parentMessages.at(-1).success, false, 'cancelled sequence is reported');
 });
 
 test('a bfcache restore rebinds terminal touch scrolling', async () => {

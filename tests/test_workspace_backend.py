@@ -748,11 +748,10 @@ def test_embedded_terminal_loader_and_resize_contracts():
     assert 'coreViewport.scrollBarWidth = Math.max(0, viewport.offsetWidth - viewport.clientWidth)' in console_html
     assert 'https://fonts.googleapis.com' not in console_html
     assert '.embedded-terminal .terminal-wrapper {padding: 0; width: 100%; height: 100%; background: var(--bg-terminal)}' in console_css
-    assert '.embedded-terminal .xterm {' in console_css
-    assert 'margin: -16px' in console_css
-    assert 'height: calc(100% + 32px)' in console_css
-    assert 'width: calc(100% + 32px)' in console_css
-    assert '.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal) !important; width: 100%}' in console_css
+    assert '.embedded-terminal .xterm {\n    height: 100%;\n    width: 100%;\n    margin: 0;\n    padding: 0;\n}' in console_css
+    assert '.embedded-terminal .xterm-viewport {width: 100%}' in console_css
+    assert '.embedded-terminal .xterm-viewport {background-color: var(--bg-terminal) !important' not in console_css
+    assert '.embedded-terminal .xterm-screen {width: 100%; height: 100%; background: var(--bg-terminal)}' not in console_css
     assert '.embedded-terminal .xterm-viewport {scrollbar-width: none}' in console_css
     assert '.embedded-terminal .xterm-viewport::-webkit-scrollbar {width: 0; height: 0}' in console_css
     assert 'html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}' in console_css

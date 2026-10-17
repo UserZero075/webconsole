@@ -4,6 +4,7 @@ const apiResponseCache = new Map();
 const state = {
     projects: [], sessions: [], workspaceData: null, selectedProjectId: null,
     selectedWorkspaceId: null, selectedSessionId: null, tabs: [], activeTabId: null,
+    mobileSurface: 'agents', mobileFilesBrowser: false,
     expandedProjects: new Set(), expandedWorkspaces: new Set(), directoryCache: new Map(),
     workspacesByProject: new Map(), workspaceLoads: new Map(), projectsLoaded: false,
     terminalViews: new Map(),
@@ -65,7 +66,7 @@ function ensureTerminalView(session) {
         frame.dataset.sessionId = session.id;
     }
     frame.title = `Terminal de ${session.title || agentName(session)}`;
-    view = {sessionId:session.id, frame, ready:false, loaded:false, loadTimer:null};
+    view = {sessionId:session.id, frame, ready:false, loaded:false, loadTimer:null, mobileDraftDirty:false};
     state.terminalViews.set(session.id, view);
     terminalResizeObserver?.observe(frame);
     if (!terminalFrameLoadBound.has(frame)) {
@@ -192,6 +193,29 @@ function sessionFor(id) {
 }
 function inventoryRefreshDue(now = Date.now()) {
     return !state.nextInventoryRefreshAt || now >= state.nextInventoryRefreshAt;
+}
+function mobileViewport() {
+    return window.matchMedia('(max-width:650px)').matches;
+}
+function setMobileSurface(surface, {filesBrowser} = {}) {
+    if (!['agents', 'files', 'git', 'messages'].includes(surface)) return;
+    if (surface === 'files') {
+        const tab = activeTab();
+        state.mobileFilesBrowser = filesBrowser ?? (tab?.type !== 'file');
+    } else state.mobileFilesBrowser = false;
+    state.mobileSurface = surface;
+    document.body.classList.remove('mobile-keyboard-open');
+    for (const name of ['agents', 'files', 'git', 'messages']) {
+        document.body.classList.toggle(`mobile-surface-${name}`, surface === name);
+    }
+    document.body.classList.toggle('mobile-files-browser', surface === 'files' && state.mobileFilesBrowser);
+    for (const button of document.querySelectorAll('[data-mobile-surface]')) {
+        if (button.dataset.mobileSurface === surface) button.setAttribute('aria-current', 'page');
+        else button.removeAttribute('aria-current');
+    }
+    if (surface === 'files' && state.selectedWorkspaceId
+            && !state.directoryCache.has(`${state.selectedWorkspaceId}:`)) loadDirectory('');
+    updateMobileDrawerState();
 }
 function isWorkspaceShell(session) {
     return session?.session_role === 'workspace_shell';
@@ -435,6 +459,10 @@ function updateMobileDrawerState() {
     if (!projectsDrawer) projects.classList.remove('open');
     if (!inspectorDrawer) document.body.classList.remove('inspector-open');
     const projectsOpen = projectsDrawer && projects.classList.contains('open');
+    const inspectorSurface = projectsDrawer && (
+        ['git', 'messages'].includes(state.mobileSurface)
+        || state.mobileSurface === 'files' && state.mobileFilesBrowser
+    );
     const inspectorOpen = inspectorDrawer && document.body.classList.contains('inspector-open');
     const projectsButton = $('toggle-projects');
     const inspectorButton = $('toggle-inspector');
@@ -443,7 +471,7 @@ function updateMobileDrawerState() {
     inspectorButton?.setAttribute('aria-expanded', String(inspectorOpen));
     inspectorButton?.setAttribute('aria-label', inspectorOpen ? 'Ocultar archivos' : 'Mostrar archivos');
     projects.inert = projectsDrawer && !projectsOpen;
-    inspector.inert = inspectorDrawer && !inspectorOpen;
+    inspector.inert = inspectorDrawer && !inspectorOpen && !inspectorSurface;
     const backdrop = $('mobile-drawer-backdrop');
     if (backdrop) backdrop.hidden = !(projectsOpen || inspectorOpen);
     if (!projectsOpen && !inspectorOpen) state.mobileDrawerTrigger = null;
@@ -528,12 +556,15 @@ function renderWorkspaceTerminal() {
     loadTerminalPreference(workspace?.id || null);
     const drawer = $('workspace-terminal');
     const toggle = $('terminal-drawer-toggle');
+    const mobileShellToggle = $('mobile-shell-open');
     const content = $('terminal-drawer-content');
     const frame = $('shell-frame');
     toggle.disabled = !workspace;
+    if (mobileShellToggle) mobileShellToggle.disabled = !workspace;
     toggle.setAttribute('aria-expanded', String(Boolean(workspace && state.terminalExpanded)));
     toggle.setAttribute('aria-label', state.terminalExpanded ? 'Plegar terminal del workspace' : 'Abrir terminal del workspace');
     drawer.classList.toggle('expanded', Boolean(workspace && state.terminalExpanded));
+    document.body.classList.toggle('workspace-shell-open', Boolean(workspace && state.terminalExpanded));
     content.hidden = !(workspace && state.terminalExpanded);
     if (workspace && state.terminalExpanded) setTerminalHeight(state.terminalHeight);
     else { drawer.style.height = ''; drawer.style.flexBasis = ''; }
@@ -1362,6 +1393,7 @@ function openTerminal(session) {
     tab.session = session;
     tab.label = session.title || agentName(session);
     state.activeTabId = id;
+    if (mobileViewport()) setMobileSurface('agents');
     if (window.matchMedia('(max-width:650px)').matches) closeMobileDrawers(true);
     state.directoryCache.clear();
     renderTree(); renderWorkspaceChrome(); renderCenter();
@@ -1380,6 +1412,7 @@ function renderTabs() {
             : tab.type === 'diff' ? `⇄ ${tab.path.split('/').at(-1)}` : tab.path.split('/').at(-1);
         open.append(node('span', 'tab-label', label));
         if (tab.type === 'file' && tab.dirty) open.append(node('span', 'dirty-mark', '●'));
+        else if (tab.type === 'terminal' && terminalViewFor(tab.sessionId)?.mobileDraftDirty) open.append(node('span', 'dirty-mark', '●'));
         open.title = tab.type === 'file' ? `${tab.path}${tab.dirty ? ' · cambios sin guardar' : ''}`
             : tab.type === 'diff' ? `${tab.path} · diff ${tab.kind === 'staged' ? 'preparado' : 'del disco'}`
                 : `${label} · sesión persistente`;
@@ -1399,6 +1432,11 @@ function activateTab(tabId) {
         recordNavigation(activeTab());
     }
     state.activeTabId = tabId;
+    if (mobileViewport()) {
+        if (tab.type === 'terminal') setMobileSurface('agents');
+        else if (tab.type === 'diff') setMobileSurface('git');
+        else setMobileSurface('files', {filesBrowser:false});
+    }
     if (tab.type === 'terminal') {
         const session = sessionFor(tab.sessionId) || tab.session;
         if (session.project_id) state.expandedProjects.add(session.project_id);
@@ -1433,6 +1471,8 @@ function closeTab(tabId) {
     const tab = state.tabs.find(item => item.id === tabId);
     if (!tab) return;
     if (tab.type === 'file' && tab.dirty && !confirm(`Descartar los cambios sin guardar de ${tab.path}?`)) return;
+    if (tab.type === 'terminal' && terminalViewFor(tab.sessionId)?.mobileDraftDirty
+            && !confirm('Descartar el borrador móvil no enviado de esta sesión? La sesión tmux seguirá activa.')) return;
     if (state.activeTabId === tabId && tab.type === 'file') {
         clearTimeout(navigationTimer);
         recordNavigation(tab);
@@ -1551,6 +1591,7 @@ async function openFile(relative) {
                      editGeneration: 0, editorMode: window.WebConsoleEditor?.isMarkdownPath(relative) ? 'preview' : 'code'};
         if (generation !== state.fileGeneration) return;
         state.tabs.push(tab); state.activeTabId = id; state.selectedSessionId = null;
+        if (mobileViewport()) setMobileSurface('files', {filesBrowser:false});
         renderCenter();
         if (window.matchMedia('(max-width:1050px)').matches) closeMobileDrawers(true);
     } catch (error) {
@@ -2764,6 +2805,7 @@ function openActions(session) {
         {id:'opencode-variant', title:'Cambiar variante de razonamiento', key:'Ctrl+T', note:'Recorre las variantes disponibles para el modelo actual.'},
         {id:'opencode-palette', title:'Abrir paleta de comandos', key:'Ctrl+P', note:'Abre la paleta de comandos de OpenCode.'},
         {id:'opencode-model', title:'Abrir selector de modelo', key:'Ctrl+X, M', note:'Leader predeterminado Ctrl+X seguido de M; puede cambiarse en OpenCode.'},
+        {id:'opencode-sidebar', title:'Alternar panel lateral', key:'Ctrl+X, B', note:'Alterna el panel de contexto, tokens, costos, MCP y LSP. Usa los keybinds predeterminados de OpenCode.'},
     ] : agent === 'codex' ? [
         {id:'codex-model', title:'Cambiar modelo o razonamiento', key:'/model', note:'Abre el selector documentado de Codex CLI; se enviará el comando y Enter.'},
         {id:'codex-permissions', title:'Revisar permisos', key:'/permissions', note:'Abre los permisos de la sesión Codex actual.'},
@@ -2789,8 +2831,39 @@ function openActions(session) {
 }
 
 function dispatchAgentAction(session, action) {
-    if (!sessionFor(session.id)?.token) { toast('La sesión no está disponible. Actualiza antes de intentarlo.'); return; }
-    if (state.activeTabId !== `terminal:${session.id}`) openTerminal(sessionFor(session.id));
+    if (state.pendingAction) { toast('Espera a que termine la acción actual antes de enviar otro atajo.'); return; }
+    const currentSession = sessionFor(session.id);
+    if (!currentSession?.token || sessionEnded(currentSession)) { toast('La sesión no está disponible. Actualiza antes de intentarlo.'); return; }
+    if (action.id === 'opencode-sidebar') {
+        if (detectedAgent(currentSession) !== 'opencode' || isWorkspaceShell(currentSession)
+                || currentSession.state === 'permission' || currentSession.notification?.kind === 'permission') {
+            toast('El panel lateral solo puede alternarse en una sesión OpenCode disponible y sin un aviso de permiso.');
+            return;
+        }
+        if (state.activeTabId !== `terminal:${currentSession.id}`) openTerminal(currentSession);
+        const frame = activeTerminalFrame();
+        if (state.frameSessionId !== currentSession.id || !frame?.contentWindow || !state.terminalFrameReady) {
+            toast('Abre la sesión OpenCode y espera a que la terminal esté conectada; el atajo no se reintentará.');
+            return;
+        }
+        const requestId = `sidebar-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        state.pendingAction = {sessionId:currentSession.id, action:action.id, requestId, attempts:1};
+        state.actionTimer = setTimeout(() => {
+            if (state.pendingAction?.requestId !== requestId) return;
+            state.pendingAction = null; state.actionTimer = null;
+            toast('Sin confirmación del atajo; no se reintentó. El panel puede haber cambiado si la terminal recibió ambas teclas.');
+        }, 5000);
+        try {
+            frame.contentWindow.postMessage({
+                type:'webconsole:agent-action', action:action.id, session_id:currentSession.id, request_id:requestId,
+            }, window.location.origin);
+        } catch (_) {
+            clearTimeout(state.actionTimer); state.actionTimer = null; state.pendingAction = null;
+            toast('No se pudo enviar el atajo a la terminal.');
+        }
+        return;
+    }
+    if (state.activeTabId !== `terminal:${session.id}`) openTerminal(currentSession);
     state.pendingAction = {sessionId:session.id, action:action.id, attempts:0};
     clearInterval(state.actionTimer);
     const attempt = () => {
@@ -2828,9 +2901,21 @@ function interruptWorkspaceShell() {
 }
 
 function handleActionResult(event) {
-    if (event.origin !== window.location.origin || event.source !== activeTerminalFrame()?.contentWindow || event.data?.type !== 'webconsole:action-result') return;
+    if (event.origin !== window.location.origin || event.data?.type !== 'webconsole:action-result') return;
     if (!state.pendingAction || state.pendingAction.action !== event.data.action
             || state.pendingAction.sessionId !== event.data.session_id) return;
+    if (state.pendingAction.action === 'opencode-sidebar') {
+        const expectedFrame = terminalFrameFor(state.pendingAction.sessionId);
+        if (event.source !== expectedFrame?.contentWindow) return;
+        if (!event.data.request_id || event.data.request_id !== state.pendingAction.requestId) return;
+        clearTimeout(state.actionTimer); state.actionTimer = null;
+        state.pendingAction = null;
+        toast(event.data.success
+            ? 'Atajo para alternar el panel lateral enviado; no se pudo verificar el estado del panel.'
+            : 'No se completó el atajo para el panel lateral; no se reintentó.');
+        return;
+    }
+    if (event.source !== activeTerminalFrame()?.contentWindow) return;
     if (event.data.success) {
         const action = state.pendingAction.action;
         clearInterval(state.actionTimer); state.actionTimer = null; state.pendingAction = null;
@@ -2844,7 +2929,12 @@ function handleTerminalMessage(event) {
     if (view) {
         const data = event.data || {};
         if (data.session_id !== view.sessionId) return;
-        if (data.type === 'webconsole:terminal-status' && data.session_id === view.sessionId
+        if (data.type === 'webconsole:mobile-keyboard-state') {
+            if (view.sessionId === state.frameSessionId) document.body.classList.toggle('mobile-keyboard-open', Boolean(data.open));
+        } else if (data.type === 'webconsole:mobile-draft-state') {
+            view.mobileDraftDirty = Boolean(data.dirty);
+            renderTabs();
+        } else if (data.type === 'webconsole:terminal-status' && data.session_id === view.sessionId
                 && typeof data.state === 'string') {
             setTerminalFrameStatus(data.session_id, data.state);
         } else if (data.type === 'webconsole:attachment-uploaded' && data.attachment?.id
@@ -2871,7 +2961,9 @@ function handleTerminalMessage(event) {
     if (!shellFrame || event.source !== shellFrame.contentWindow) return;
     const data = event.data || {};
     if (data.session_id !== state.shellFrameSessionId) return;
-    if (data.type === 'webconsole:interrupt-result') {
+    if (data.type === 'webconsole:mobile-keyboard-state') {
+        document.body.classList.toggle('mobile-keyboard-open', Boolean(data.open));
+    } else if (data.type === 'webconsole:interrupt-result') {
         toast(data.success ? 'Ctrl+C enviado a la terminal del workspace.' : 'La terminal no está conectada; no se envió Ctrl+C.');
     }
 }
@@ -2916,6 +3008,7 @@ function attachEvents() {
         if (tab?.type === 'diff') openFile(tab.path);
     });
     $('add-project').addEventListener('click', openProjectDialog);
+    $('sidebar-add-project')?.addEventListener('click', openProjectDialog);
     $('welcome-action').addEventListener('click', () => {
         if (!selectedProject()) openProjectDialog();
         else if (!selectedWorkspace()) refreshAll();
@@ -2928,6 +3021,7 @@ function attachEvents() {
     });
     if (hasWorkspaceTerminalUI()) {
         $('terminal-drawer-toggle').addEventListener('click', () => setTerminalExpanded(!state.terminalExpanded));
+        $('mobile-shell-open')?.addEventListener('click', () => setTerminalExpanded(true));
         $('shell-start').addEventListener('click', () => ensureWorkspaceTerminal(false));
         $('shell-new').addEventListener('click', () => ensureWorkspaceTerminal(true));
         $('shell-interrupt').addEventListener('click', interruptWorkspaceShell);
@@ -3116,6 +3210,17 @@ function attachEvents() {
     $('toggle-inspector').addEventListener('click', event => {
         setMobileDrawer('inspector', !document.body.classList.contains('inspector-open'), event.currentTarget);
     });
+    $('mobile-workspace-nav')?.addEventListener('click', event => {
+        const button = event.target.closest('[data-mobile-surface]');
+        if (!button || !mobileViewport()) return;
+        const surface = button.dataset.mobileSurface;
+        if (surface === 'files' && state.mobileSurface === 'files' && state.mobileFilesBrowser
+                && activeTab()?.type === 'file') {
+            setMobileSurface('files', {filesBrowser:false});
+            return;
+        }
+        setMobileSurface(surface, {filesBrowser:surface === 'files' ? true : undefined});
+    });
     $('mobile-drawer-backdrop')?.addEventListener('click', () => closeMobileDrawers(true));
     document.addEventListener('keydown', event => {
         if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
@@ -3136,6 +3241,7 @@ function attachEvents() {
 
 document.addEventListener('DOMContentLoaded', () => {
     attachEvents();
+    setMobileSurface('agents');
     loadPreferences();
     refreshAll();
 });

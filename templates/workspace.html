@@ -30,7 +30,7 @@
     <main class="workbench">
         <div class="drawer-backdrop" id="mobile-drawer-backdrop" hidden aria-hidden="true"></div>
         <aside class="project-sidebar" id="project-sidebar" tabindex="-1" aria-label="Proyectos y agentes">
-            <div class="sidebar-heading"><span>Proyectos</span><button class="mini-button" id="refresh-all" title="Actualizar workspace" aria-label="Actualizar workspace">↻</button></div>
+            <div class="sidebar-heading"><span>Proyectos</span><div class="sidebar-heading-actions"><button class="mini-button" id="sidebar-add-project" type="button" title="Añadir proyecto" aria-label="Añadir proyecto">＋</button><button class="mini-button" id="refresh-all" title="Actualizar workspace" aria-label="Actualizar workspace">↻</button></div></div>
             <label class="project-search"><span aria-hidden="true">⌕</span><input id="project-search" type="search" placeholder="Buscar proyecto o agente" autocomplete="off"></label>
             <div class="project-tree" id="project-tree" aria-live="polite"><div class="sidebar-loading">Cargando proyectos…</div></div>
         </aside>
@@ -41,7 +41,8 @@
                 <div class="toolbar-actions">
                     <select id="branch-picker" aria-label="Abrir workspace o rama" disabled><option>Rama o workspace</option></select>
                     <button class="square-button" id="new-worktree" title="Crear worktree aislado" aria-label="Crear worktree aislado" disabled>⑂</button>
-                    <button class="terminal-action" id="interrupt-agent" type="button" title="Enviar Ctrl+C al agente activo" disabled>Interrumpir</button>
+                    <button class="terminal-action mobile-shell-open" id="mobile-shell-open" type="button" aria-controls="workspace-terminal" disabled>Shell</button>
+                    <button class="terminal-action" id="interrupt-agent" type="button" title="Enviar Ctrl+C al agente activo" aria-label="Interrumpir agente activo" disabled>Interrumpir</button>
                 </div>
             </div>
             <nav class="tab-strip" id="tab-strip" aria-label="Pestañas de trabajo"></nav>
@@ -141,6 +142,13 @@
             </section>
         </aside>
     </main>
+
+    <nav class="mobile-workspace-nav" id="mobile-workspace-nav" aria-label="Secciones del workspace">
+        <button type="button" data-mobile-surface="agents" aria-current="page"><span aria-hidden="true">●</span><span>Agentes</span></button>
+        <button type="button" data-mobile-surface="files"><span aria-hidden="true">▤</span><span>Archivos</span></button>
+        <button type="button" data-mobile-surface="git"><span aria-hidden="true">⑂</span><span>Git</span></button>
+        <button type="button" data-mobile-surface="messages"><span aria-hidden="true">✉</span><span>Mensajes</span></button>
+    </nav>
 
     <dialog id="project-dialog" class="form-dialog">
         <form id="project-form">

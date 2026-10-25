@@ -14,38 +14,24 @@
     </style>
 </head>
 <body>
-    <header class="topbar">
-        <a class="brand" href="/" aria-label="{{ preferences.brand_name }}, workspace"><span class="brand-mark">w</span><span class="brand-name">{{ preferences.brand_name }}</span></a>
-        <div class="top-separator"></div>
-        <div class="top-context"><span id="top-project">Sin proyecto seleccionado</span><span id="top-workspace"></span></div>
-        <div class="top-actions">
-            <button class="mobile-nav-button" id="toggle-projects" type="button" aria-label="Mostrar proyectos" aria-controls="project-sidebar" aria-expanded="false">Proyectos</button>
-            <button class="mobile-nav-button" id="toggle-inspector" type="button" aria-label="Mostrar archivos" aria-controls="inspector" aria-expanded="false">Archivos</button>
-            <button class="top-button" id="open-preferences" aria-label="Personalizar la apariencia" title="Personalizar"><span aria-hidden="true">⚙</span><span class="top-button-label">Personalizar</span></button>
-            <button class="top-button" id="add-project" aria-label="Añadir proyecto" title="Añadir proyecto"><span aria-hidden="true">＋</span><span class="top-button-label">Proyecto</span></button>
-            <button class="top-button primary" id="add-agent" aria-label="Crear agente" title="Crear agente" disabled><span aria-hidden="true">＋</span><span class="top-button-label">Agente</span></button>
-        </div>
-    </header>
-
-    <main class="workbench">
+    <main class="workbench" id="workbench">
         <div class="drawer-backdrop" id="mobile-drawer-backdrop" hidden aria-hidden="true"></div>
         <aside class="project-sidebar" id="project-sidebar" tabindex="-1" aria-label="Proyectos y agentes">
-            <div class="sidebar-heading"><span>Proyectos</span><div class="sidebar-heading-actions"><button class="mini-button" id="sidebar-add-project" type="button" title="Añadir proyecto" aria-label="Añadir proyecto">＋</button><button class="mini-button" id="refresh-all" title="Actualizar workspace" aria-label="Actualizar workspace">↻</button></div></div>
+            <div class="sidebar-heading"><span>Proyectos</span><div class="sidebar-heading-actions"><button class="mini-button desktop-panel-collapse" id="collapse-project-sidebar" type="button" title="Ocultar proyectos" aria-label="Ocultar proyectos" aria-controls="project-sidebar" aria-expanded="true">‹</button><button class="mini-button" id="sidebar-add-project" type="button" title="Añadir proyecto" aria-label="Añadir proyecto">＋</button><button class="mini-button" id="refresh-all" title="Actualizar workspace" aria-label="Actualizar workspace">↻</button><button class="mini-button inspector-drawer-toggle" id="toggle-inspector" type="button" title="Mostrar inspector" aria-label="Mostrar inspector" aria-controls="inspector" aria-expanded="false">▤</button></div></div>
             <label class="project-search"><span aria-hidden="true">⌕</span><input id="project-search" type="search" placeholder="Buscar proyecto o agente" autocomplete="off"></label>
             <div class="project-tree" id="project-tree" aria-live="polite"><div class="sidebar-loading">Cargando proyectos…</div></div>
+            <div class="sidebar-bottom">
+                <button class="sidebar-preferences" id="open-preferences" type="button" aria-label="Personalizar apariencia y notificaciones" title="Personalizar apariencia y notificaciones"><span aria-hidden="true">⚙</span><span>Personalizar</span></button>
+            </div>
         </aside>
+        <div class="sidebar-resize-handle" id="project-sidebar-resize" role="separator" aria-orientation="vertical" aria-label="Cambiar ancho de la barra de proyectos" aria-controls="project-sidebar" aria-valuemin="180" aria-valuemax="420" tabindex="0" title="Arrastra para cambiar el ancho"></div>
 
         <section class="center-pane" aria-label="Área de trabajo">
-            <div class="pane-toolbar">
-                <div class="work-title"><strong id="work-title">Workspace</strong><span id="work-subtitle">Selecciona un proyecto</span></div>
-                <div class="toolbar-actions">
-                    <select id="branch-picker" aria-label="Abrir workspace o rama" disabled><option>Rama o workspace</option></select>
-                    <button class="square-button" id="new-worktree" title="Crear worktree aislado" aria-label="Crear worktree aislado" disabled>⑂</button>
-                    <button class="terminal-action mobile-shell-open" id="mobile-shell-open" type="button" aria-controls="workspace-terminal" disabled>Shell</button>
-                    <button class="terminal-action" id="interrupt-agent" type="button" title="Enviar Ctrl+C al agente activo" aria-label="Interrumpir agente activo" disabled>Interrumpir</button>
-                </div>
-            </div>
-            <nav class="tab-strip" id="tab-strip" aria-label="Pestañas de trabajo"></nav>
+            <nav class="tab-strip" id="tab-strip" aria-label="Pestañas de trabajo">
+                <button class="workspace-panel-restore restore-project-panel" id="restore-project-sidebar" type="button" title="Mostrar proyectos" aria-label="Mostrar proyectos" aria-controls="project-sidebar" aria-expanded="false" hidden>›</button>
+                <div class="workspace-tabs" id="workspace-tabs"></div>
+                <button class="workspace-panel-restore restore-inspector-panel" id="restore-inspector-sidebar" type="button" title="Mostrar inspector" aria-label="Mostrar inspector" aria-controls="inspector" aria-expanded="false" hidden>‹</button>
+            </nav>
             <div class="work-surface" id="work-surface">
                 <div class="welcome-view" id="welcome-view">
                     <div class="welcome-glyph">⌘</div>
@@ -53,7 +39,7 @@
                     <p id="welcome-copy">Registra una carpeta para abrir sus ramas, archivos y sesiones persistentes en un mismo espacio.</p>
                     <button class="top-button primary" id="welcome-action">Añadir proyecto</button>
                 </div>
-                <iframe id="terminal-frame" title="Terminal del agente" hidden></iframe>
+                <iframe id="terminal-frame" title="Terminal del agente" allow="clipboard-write" hidden></iframe>
                 <div class="terminal-loading" id="terminal-loading" role="status" aria-live="polite" aria-busy="true" hidden>
                     <span class="loading-orbit" aria-hidden="true"><span></span></span>
                     <strong id="terminal-loading-title">Preparando terminal</strong>
@@ -110,28 +96,94 @@
                     <div class="terminal-ended" id="terminal-ended" hidden>
                         <span>La terminal terminó; no se reiniciará automáticamente. Usa «Nueva terminal» para crear otra.</span>
                     </div>
-                    <iframe id="shell-frame" title="Terminal independiente del workspace" hidden></iframe>
+                    <iframe id="shell-frame" title="Terminal independiente del workspace" allow="clipboard-write" hidden></iframe>
                 </div>
             </section>
             <div class="bottom-status"><span class="status-led" id="workspace-led"></span><span id="workspace-status">Preparado</span><span class="status-spacer"></span><span id="workspace-path"></span><span id="terminal-hint">Terminal persistente · tmux</span></div>
         </section>
+        <div class="sidebar-resize-handle inspector-resize-handle" id="inspector-sidebar-resize" role="separator" aria-orientation="vertical" aria-label="Cambiar ancho del inspector" aria-controls="inspector" aria-valuemin="220" aria-valuemax="480" tabindex="0" title="Arrastra para cambiar el ancho"></div>
 
-        <aside class="inspector" id="inspector" tabindex="-1" aria-label="Archivos, Git y mensajes">
-            <section class="explorer-section">
-                <div class="inspector-heading"><span>Archivos</span><button class="mini-button" id="refresh-files" title="Actualizar archivos" aria-label="Actualizar archivos">↻</button></div>
-                <div class="explorer-root" id="explorer-root">Selecciona un workspace</div>
-                <label class="file-search"><span aria-hidden="true">⌕</span><input id="file-search" type="search" placeholder="Filtrar carpeta" autocomplete="off"></label>
-                <div class="file-tree" id="file-tree"><div class="inspector-empty">Los archivos aparecerán aquí.</div></div>
+        <aside class="inspector" id="inspector" tabindex="-1" aria-label="Panel lateral del workspace">
+            <div class="inspector-topbar" id="inspector-topbar">
+            <div class="inspector-tabs" id="inspector-tabs" role="tablist" aria-label="Panel lateral">
+                <button class="inspector-tab" id="inspector-tab-files" type="button" role="tab" data-inspector-tab="files" aria-controls="explorer-section" aria-label="Explorer" title="Explorer" aria-selected="true" tabindex="0">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h6l2 2h8v11H4z"/><path d="M8 10v6m0-4h3m-3 3h3"/></svg>
+                </button>
+                <button class="inspector-tab" id="inspector-tab-history" type="button" role="tab" data-inspector-tab="history" aria-controls="history-section" aria-label="Historial de sesiones" title="Historial de sesiones" aria-selected="false" tabindex="-1">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7v5h5"/><path d="M5.2 11a7.5 7.5 0 1 1 .9 5.8"/><path d="M12 7v5l3 2"/></svg>
+                </button>
+                <button class="inspector-tab" id="inspector-tab-git" type="button" role="tab" data-inspector-tab="git" aria-controls="git-section" aria-label="Git" title="Git" aria-selected="false" tabindex="-1">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10m0-7h6a4 4 0 0 0 4-4"/></svg>
+                </button>
+                <button class="inspector-tab" id="inspector-tab-messages" type="button" role="tab" data-inspector-tab="messages" aria-controls="message-section" aria-label="Mensajes" title="Mensajes" aria-selected="false" tabindex="-1">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v12H9l-5 3z"/><path d="M8 10h8m-8 3h5"/></svg>
+                </button>
+            </div>
+                <button class="mini-button desktop-panel-collapse inspector-panel-collapse" id="collapse-inspector-sidebar" type="button" title="Ocultar inspector" aria-label="Ocultar inspector" aria-controls="inspector" aria-expanded="true">›</button>
+            </div>
+            <section class="explorer-section inspector-tab-panel" id="explorer-section" role="tabpanel" aria-labelledby="inspector-tab-files" tabindex="0">
+                <div class="inspector-heading explorer-heading"><span class="explorer-heading-label">EXPLORER</span><label class="explorer-picker-wrap"><select class="explorer-root" id="explorer-workspace-picker" aria-label="Workspace actual" title="Selecciona un workspace"><option value="">Selecciona un workspace</option></select></label><div class="explorer-toolbar-actions"><button class="mini-button" id="collapse-file-tree" type="button" title="Contraer todo" aria-label="Contraer todo">⊟</button><details class="explorer-overflow"><summary class="mini-button" title="Más opciones" aria-label="Más opciones">⋯</summary><div class="explorer-overflow-menu"><button class="dotfiles-toggle" id="toggle-dotfiles" type="button" title="Ocultar archivos ocultos" aria-label="Mostrar archivos ocultos" aria-pressed="true"><span>.*</span><span>Archivos ocultos</span></button></div></details><button class="mini-button" id="refresh-files" type="button" title="Actualizar archivos" aria-label="Actualizar archivos">↻</button></div></div>
+                <div class="explorer-mode-switch" role="group" aria-label="Modo del explorador">
+                    <button type="button" class="explorer-mode-button active" data-explorer-mode="names" aria-pressed="true">Nombres</button>
+                    <button type="button" class="explorer-mode-button" data-explorer-mode="content" aria-pressed="false">Contenido</button>
+                </div>
+                <div class="explorer-mode-panel" id="explorer-names-panel">
+                    <label class="file-search explorer-search"><span aria-hidden="true">⌕</span><input id="file-search" type="search" placeholder="Filtrar por nombre" autocomplete="off"></label>
+                    <div class="file-tree" id="file-tree"><div class="inspector-empty">Los archivos aparecerán aquí.</div></div>
+                </div>
+                <div class="explorer-mode-panel content-search-panel" id="explorer-content-panel" hidden>
+                    <label class="file-search explorer-search"><span aria-hidden="true">⌕</span><input id="content-search" type="search" placeholder="Buscar en archivos" autocomplete="off"></label>
+                    <div class="search-options" role="group" aria-label="Opciones de búsqueda">
+                        <label><input type="checkbox" id="search-case-sensitive"><span>Aa</span><small>Mayús./minús.</small></label>
+                        <label><input type="checkbox" id="search-whole-word"><span>ab</span><small>Palabra</small></label>
+                        <label><input type="checkbox" id="search-regex"><span>.*</span><small>Regex</small></label>
+                    </div>
+                    <details class="search-filter-details" open>
+                        <summary>Filtros de archivos</summary>
+                        <label>Incluir<input id="search-include" type="text" placeholder="src/**, *.py" autocomplete="off"></label>
+                        <label>Excluir<input id="search-exclude" type="text" placeholder="vendor/**, *.lock" autocomplete="off"></label>
+                    </details>
+                    <div class="search-results-meta" id="search-results-meta" aria-live="polite"></div>
+                    <div class="search-results" id="search-results"><div class="inspector-empty">Escribe para buscar en el workspace.</div></div>
+                </div>
             </section>
 
-            <section class="git-section">
-                <div class="inspector-heading"><span>Git</span><span class="github-mark" id="github-mark" hidden title="El repositorio tiene un remoto de GitHub">GH</span><button class="mini-button" id="refresh-git" title="Actualizar estado de Git" aria-label="Actualizar estado de Git">↻</button></div>
-                <div class="git-branch" id="git-branch">Sin repositorio Git</div>
-                <div class="git-tools"><select id="remote-picker" aria-label="Remoto para actualizar ramas" hidden></select><button class="text-button" id="fetch-branches" hidden>Actualizar ramas</button></div>
+            <section class="history-section inspector-tab-panel" id="history-section" role="tabpanel" aria-labelledby="inspector-tab-history" tabindex="0" hidden>
+                <div class="inspector-heading"><span>Agent History</span><button class="mini-button" id="refresh-history" type="button" title="Actualizar sesiones" aria-label="Actualizar sesiones">↻</button></div>
+                <div class="history-scope" role="group" aria-label="Ámbito del historial">
+                    <button type="button" data-history-scope="workspace" aria-pressed="true">Workspace</button>
+                    <button type="button" data-history-scope="project" aria-pressed="false">Project</button>
+                    <button type="button" data-history-scope="all" aria-pressed="false">All</button>
+                </div>
+                <label class="file-search history-search"><span aria-hidden="true">⌕</span><input id="history-search" type="search" placeholder="Buscar sesiones de WebConsole" autocomplete="off"></label>
+                <p class="history-disclaimer">Sesiones registradas en WebConsole; no es un índice de transcripciones.</p>
+                <div class="history-list" id="history-list"><div class="inspector-empty">Selecciona un workspace para ver sus sesiones.</div></div>
+            </section>
+
+            <section class="git-section inspector-tab-panel" id="git-section" role="tabpanel" aria-labelledby="inspector-tab-git" tabindex="0" hidden>
+                <div class="inspector-heading source-control-heading"><span>Source Control</span><span class="git-change-count" id="git-change-count" hidden></span><span class="github-mark" id="github-mark" hidden title="El repositorio tiene un remoto de GitHub">GH</span><button class="text-button create-pr-button" id="create-pr" type="button" hidden>Create PR</button><button class="mini-button" id="refresh-git" title="Actualizar estado de Git" aria-label="Actualizar estado de Git">↻</button></div>
+                <div class="git-branch-row"><span id="git-branch">Sin repositorio Git</span><div class="git-tools"><select id="remote-picker" aria-label="Remoto para actualizar ramas" hidden></select><button class="text-button" id="fetch-branches" hidden>Actualizar ramas</button></div></div>
+                <div class="workspace-context-foldout">
+                    <details>
+                        <summary>Workspace</summary>
+                        <div class="workspace-context" aria-label="Workspace actual">
+                            <div class="workspace-context-heading"><strong id="work-title">Workspace</strong><small id="work-subtitle">Selecciona un proyecto</small></div>
+                            <label class="workspace-branch"><span>Rama o workspace</span><select id="branch-picker" aria-label="Abrir workspace o rama" disabled><option>Rama o workspace</option></select></label>
+                            <div class="workspace-actions">
+                                <button class="workspace-action" id="new-worktree" type="button" title="Crear worktree aislado" aria-label="Crear worktree aislado" disabled>＋ Worktree</button>
+                                <button class="terminal-action mobile-shell-open" id="mobile-shell-open" type="button" aria-controls="workspace-terminal" disabled>Shell</button>
+                                <button class="terminal-action" id="interrupt-agent" type="button" title="Enviar Ctrl+C al agente activo" aria-label="Interrumpir agente activo" disabled>Interrumpir</button>
+                            </div>
+                        </div>
+                    </details>
+                </div>
+                <div class="git-commit-area"><textarea id="commit-message" rows="2" maxlength="2000" placeholder="Mensaje de commit" aria-label="Mensaje de commit"></textarea><button class="top-button primary" id="commit-changes" type="button" disabled>Commit</button></div>
+                <div class="git-search-row"><label class="file-search git-search"><span aria-hidden="true">⌕</span><input id="git-search" type="search" placeholder="Filtrar cambios" autocomplete="off"></label><button class="text-button" id="stage-all" type="button" disabled>Stage All</button></div>
                 <div class="git-changes" id="git-changes"><div class="inspector-empty">Selecciona un workspace para ver sus cambios.</div></div>
+                <section class="git-history-dock"><button type="button" class="git-history-toggle" id="toggle-git-history" aria-expanded="false"><span class="git-group-chevron">›</span><span>Commits</span><span class="git-history-count" id="git-history-count"></span></button><div class="git-history-list" id="git-history-list" hidden><div class="inspector-empty">Expande para cargar el historial local.</div></div></section>
             </section>
 
-            <section class="message-section">
+            <section class="message-section inspector-tab-panel" id="message-section" role="tabpanel" aria-labelledby="inspector-tab-messages" tabindex="0" hidden>
                 <div class="inspector-heading"><span>Mensajes del proyecto</span><span class="message-count" id="message-count"></span></div>
                 <div class="message-feed" id="message-feed"><div class="inspector-empty">Los agentes pueden coordinarse aquí.</div></div>
                 <form class="message-form" id="message-form" hidden>
@@ -144,11 +196,25 @@
     </main>
 
     <nav class="mobile-workspace-nav" id="mobile-workspace-nav" aria-label="Secciones del workspace">
+        <button type="button" id="toggle-projects" aria-label="Mostrar proyectos" aria-controls="project-sidebar" aria-expanded="false"><span aria-hidden="true">☷</span><span>Proyectos</span></button>
         <button type="button" data-mobile-surface="agents" aria-current="page"><span aria-hidden="true">●</span><span>Agentes</span></button>
-        <button type="button" data-mobile-surface="files"><span aria-hidden="true">▤</span><span>Archivos</span></button>
+        <button type="button" data-mobile-surface="files"><span aria-hidden="true">▤</span><span>Explorer</span></button>
+        <button type="button" data-mobile-surface="history"><span aria-hidden="true">◷</span><span>History</span></button>
         <button type="button" data-mobile-surface="git"><span aria-hidden="true">⑂</span><span>Git</span></button>
         <button type="button" data-mobile-surface="messages"><span aria-hidden="true">✉</span><span>Mensajes</span></button>
     </nav>
+
+    <dialog id="create-pr-dialog" class="form-dialog">
+        <form id="create-pr-form">
+            <div class="dialog-kicker">GitHub</div><h2>Crear Pull Request</h2>
+            <p>Se publicará la rama actual en <code>origin</code> y se abrirá un PR hacia la rama base seleccionada.</p>
+            <label>Título<input id="pr-title" maxlength="200" required></label>
+            <label>Rama base<input id="pr-base" maxlength="200" required></label>
+            <label>Descripción<textarea id="pr-body" rows="4" maxlength="10000"></textarea></label>
+            <div class="dialog-error" id="pr-error" hidden></div>
+            <div class="dialog-actions"><button type="button" class="text-button" data-close="create-pr-dialog">Cancelar</button><button type="submit" class="top-button primary" id="pr-submit">Publicar y crear PR</button></div>
+        </form>
+    </dialog>
 
     <dialog id="project-dialog" class="form-dialog">
         <form id="project-form">
@@ -256,7 +322,7 @@
 
     <dialog id="preferences-dialog" class="form-dialog preferences-dialog" aria-labelledby="preferences-title">
         <form id="preferences-form">
-            <div class="dialog-kicker">Personalización</div><h2 id="preferences-title">Apariencia</h2><p>Estos valores se aplican a todo WebConsole: workspace y terminales.</p>
+            <div class="dialog-kicker">Personalización</div><h2 id="preferences-title">Apariencia y avisos</h2><p>Los colores se aplican a todo WebConsole. Los avisos de agentes son opcionales y solo se activan con tu permiso.</p>
 
             <label>Nombre de la aplicación<input id="pref-brand" name="brand_name" required maxlength="80" autocomplete="off" placeholder="WebConsole"></label>
 
@@ -273,13 +339,19 @@
 
             <fieldset class="color-fieldset">
                 <legend>Fondo de la terminal</legend>
-                <div class="color-current"><span class="color-swatch" id="terminal-swatch" aria-hidden="true"></span><code id="terminal-hex">#1a1a2e</code><input type="color" id="terminal-native" aria-label="Selector nativo del fondo de la terminal"></div>
+                <div class="color-current"><span class="color-swatch" id="terminal-swatch" aria-hidden="true"></span><code id="terminal-hex">#0b0b0d</code><input type="color" id="terminal-native" aria-label="Selector nativo del fondo de la terminal"></div>
                 <div class="rgb-channels">
-                    <label class="rgb-channel"><span>R</span><input type="range" min="0" max="255" value="26" data-color="terminal" data-channel="r" aria-label="Rojo del fondo"><input type="number" min="0" max="255" value="26" data-color="terminal" data-channel="r" aria-label="Valor rojo del fondo"></label>
-                    <label class="rgb-channel"><span>G</span><input type="range" min="0" max="255" value="26" data-color="terminal" data-channel="g" aria-label="Verde del fondo"><input type="number" min="0" max="255" value="26" data-color="terminal" data-channel="g" aria-label="Valor verde del fondo"></label>
-                    <label class="rgb-channel"><span>B</span><input type="range" min="0" max="255" value="46" data-color="terminal" data-channel="b" aria-label="Azul del fondo"><input type="number" min="0" max="255" value="46" data-color="terminal" data-channel="b" aria-label="Valor azul del fondo"></label>
+                    <label class="rgb-channel"><span>R</span><input type="range" min="0" max="255" value="11" data-color="terminal" data-channel="r" aria-label="Rojo del fondo"><input type="number" min="0" max="255" value="11" data-color="terminal" data-channel="r" aria-label="Valor rojo del fondo"></label>
+                    <label class="rgb-channel"><span>G</span><input type="range" min="0" max="255" value="11" data-color="terminal" data-channel="g" aria-label="Verde del fondo"><input type="number" min="0" max="255" value="11" data-color="terminal" data-channel="g" aria-label="Valor verde del fondo"></label>
+                    <label class="rgb-channel"><span>B</span><input type="range" min="0" max="255" value="13" data-color="terminal" data-channel="b" aria-label="Azul del fondo"><input type="number" min="0" max="255" value="13" data-color="terminal" data-channel="b" aria-label="Valor azul del fondo"></label>
                 </div>
                 <div class="preset-row" role="group" aria-label="Fondos de terminal predefinidos" id="terminal-presets"></div>
+            </fieldset>
+
+            <fieldset class="color-fieldset notification-settings">
+                <legend>Notificaciones de agentes</legend>
+                <label class="check-row"><input type="checkbox" id="pref-browser-notifications"><span>Recibir avisos cuando un agente termine un turno o necesite asistencia</span></label>
+                <p class="notification-preference-status" id="browser-notifications-status" role="status" aria-live="polite"></p>
             </fieldset>
 
             <div class="dialog-error" id="preferences-error" hidden></div>

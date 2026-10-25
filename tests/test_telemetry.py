@@ -80,6 +80,48 @@ def test_native_events_do_not_depend_on_browser_and_streams_upsert(tmp_path, mon
     assert not list((tmp_path / 'test123' / 'events').glob('*.json'))
 
 
+def test_turn_completion_is_a_persistent_done_state_until_the_next_explicit_working_event(tmp_path, monkeypatch):
+    monitor, info, _, processes = fixture_monitor(tmp_path, monkeypatch)
+    write_event(tmp_path, {'type': 'working', 'agent': 'codex'})
+    monitor.sample(force=True)
+    payload = monitor.payload('test123', info)
+    assert (payload['state'], payload['state_source']) == ('working', 'event')
+
+    write_event(tmp_path, {'type': 'completed', 'agent': 'codex'})
+    monitor.sample(force=True)
+    payload = monitor.payload('test123', info)
+    assert (payload['state'], payload['state_source']) == ('done', 'event')
+
+    # Exiting the CLI process is not itself another turn completion and must
+    # not erase the explicit completion event either.
+    processes.pop(43)
+    monitor.sample(force=True)
+    payload = monitor.payload('test123', info)
+    assert (payload['state'], payload['state_source']) == ('done', 'event')
+    assert payload['notification']['kind'] == 'completed'
+    assert payload['notification']['source'] == 'event'
+
+    processes[43] = dict(pid=43, parent=42, group=43, foreground=43, ticks=0,
+                         name='node', agent='codex', start='3')
+    write_event(tmp_path, {'type': 'working', 'agent': 'codex'})
+    monitor.sample(force=True)
+    payload = monitor.payload('test123', info)
+    assert (payload['state'], payload['state_source']) == ('working', 'event')
+
+
+def test_explicit_failure_and_interruption_are_not_collapsed_into_idle(tmp_path, monkeypatch):
+    monitor, info, _, _ = fixture_monitor(tmp_path, monkeypatch)
+    write_event(tmp_path, {'type': 'error', 'agent': 'codex', 'message': 'falló'})
+    monitor.sample(force=True)
+    payload = monitor.payload('test123', info)
+    assert (payload['state'], payload['state_source']) == ('failed', 'event')
+
+    write_event(tmp_path, {'type': 'interrupted', 'agent': 'codex'})
+    monitor.sample(force=True)
+    payload = monitor.payload('test123', info)
+    assert (payload['state'], payload['state_source']) == ('interrupted', 'event')
+
+
 def test_background_tool_and_exit_notification(tmp_path, monkeypatch):
     monitor, info, screen, processes = fixture_monitor(tmp_path, monkeypatch)
     processes[43].update(name='ffmpeg', agent=None, group=99)
@@ -90,6 +132,18 @@ def test_background_tool_and_exit_notification(tmp_path, monkeypatch):
     monitor.sample(force=True)
     notice = monitor.payload('test123', info)['notification']
     assert notice['source'] == 'process' and 'ffmpeg' in notice['message']
+    assert monitor.payload('test123', info)['state'] != 'done'
+
+
+def test_agent_process_exit_is_not_a_confirmed_turn_completion(tmp_path, monkeypatch):
+    monitor, info, _, processes = fixture_monitor(tmp_path, monkeypatch)
+    monitor.sample(force=True)
+    processes.pop(43)
+    monitor.sample(force=True)
+    payload = monitor.payload('test123', info)
+    assert payload['notification']['kind'] == 'completed'
+    assert payload['notification']['source'] == 'process'
+    assert (payload['state'], payload['state_source']) == ('idle', 'process')
 
 
 def test_old_permission_text_and_done_text_are_not_task_notifications(tmp_path, monkeypatch):
@@ -135,8 +189,9 @@ def test_hermes_hook_adapter_observes_tools_and_completion(tmp_path):
     adapter = ROOT / 'integrations' / 'hermes_event.py'
     subprocess.run([sys.executable, str(adapter), 'pre_tool_call'], input=json.dumps({'tool_name': 'terminal'}), text=True, env=env, check=True)
     subprocess.run([sys.executable, str(adapter), 'on_session_end'], input=json.dumps({'completed': True}), text=True, env=env, check=True)
+    subprocess.run([sys.executable, str(adapter), 'on_session_end'], input=json.dumps({'interrupted': True}), text=True, env=env, check=True)
     events = [json.loads(path.read_text()) for path in sorted(directory.glob('*.json'))]
-    assert [event['type'] for event in events] == ['tool', 'completed']
+    assert [event['type'] for event in events] == ['tool', 'completed', 'interrupted']
     assert all(event['agent'] == 'hermes' for event in events)
 
 
@@ -161,3 +216,17 @@ def test_agent_execing_over_the_shell_is_identified(tmp_path, monkeypatch):
     processes[42].update(name='codex', agent='codex')
     monitor.sample(force=True)
     assert monitor.payload('test123', info)['agent']['name'] == 'Codex'
+
+
+def test_opencode_launcher_loads_the_v2_status_plugin_in_its_private_server():
+    launcher = (ROOT / 'app' / 'session_shell.py').read_text()
+    plugin = (ROOT / 'integrations' / 'opencode' / 'index.mjs').read_text()
+    assert "command.append('--standalone')" in launcher
+    assert "config.setdefault('plugins', [])" in launcher
+    assert "config.setdefault('plugin', [])" not in launcher
+    assert "'integrations' / 'opencode.mjs').as_uri()" in launcher
+    assert 'plugins[:] = [entry for entry in plugins if entry != legacy_plugin]' in launcher
+    assert "'integrations' / 'opencode').as_uri()" in launcher
+    assert "command.append('--continue')" in launcher
+    assert 'export default Plugin.define({' in plugin
+    assert 'ctx.event.subscribe({signal:controller.signal})' in plugin

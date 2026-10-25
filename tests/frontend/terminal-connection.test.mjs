@@ -135,7 +135,7 @@ class FakeWebSocket {
   }
 }
 
-async function buildContext({embedded = true, sessionRole = 'workspace_shell'} = {}) {
+async function buildContext({embedded = true, sessionRole = 'workspace_shell', webgl = false} = {}) {
   const source = await loadSource({sessionRole});
   const clock = makeClock();
   FakeWebSocket.instances.length = 0;
@@ -144,6 +144,7 @@ async function buildContext({embedded = true, sessionRole = 'workspace_shell'} =
   const documentListeners = {};
   const windowListeners = {};
   const parentMessages = [];
+  const terminals = [];
   let touchBindCount = 0;
 
   const document = {
@@ -174,9 +175,19 @@ async function buildContext({embedded = true, sessionRole = 'workspace_shell'} =
     localStorage: {getItem() { return null; }, setItem() {}, removeItem() {}},
     navigator: {maxTouchPoints: 0, clipboard: {writeText() { return Promise.resolve(); }}},
   };
+  if (webgl) {
+    window.WebglAddon = {WebglAddon: class {
+      constructor() { this.disposed = false; this.contextLossHandler = null; }
+      onContextLoss(handler) { this.contextLossHandler = handler; }
+      dispose() { this.disposed = true; }
+    }};
+  }
 
   class FakeTerminal {
     constructor() {
+      this.opened = false;
+      this.loadedAddons = [];
+      terminals.push(this);
       this.element = null;
       this.modes = {mouseTrackingMode: 'none'};
       this.buffer = {
@@ -185,11 +196,13 @@ async function buildContext({embedded = true, sessionRole = 'workspace_shell'} =
       };
       this._core = {viewport: {scrollBarWidth: 0}};
     }
+    loadAddon(addon) { this.loadedAddons.push(addon); }
+    open() { this.opened = true; }
     write(payload, cb) { cb?.(); }
   }
   // The template calls a large xterm surface; any unstubbed method is a no-op.
   const terminalTarget = FakeTerminal.prototype;
-  for (const name of ['loadAddon', 'open', 'focus', 'paste', 'onScroll', 'onWriteParsed',
+  for (const name of ['focus', 'paste', 'onScroll', 'onWriteParsed',
                       'onData', 'scrollToBottom', 'attachCustomKeyEventHandler',
                       'clear', 'reset', 'refresh', 'scrollToLine', 'hasSelection']) {
     terminalTarget[name] = function () {};
@@ -235,6 +248,7 @@ async function buildContext({embedded = true, sessionRole = 'workspace_shell'} =
   clock.clearAll();
   FakeWebSocket.instances.length = 0;
   return {context, clock, parentMessages, documentListeners, windowListeners, elements,
+    terminals,
     touchBindCount: () => touchBindCount};
 }
 
@@ -248,6 +262,16 @@ function connectNow(context, clock) {
   clock.advance(0);
   return FakeWebSocket.instances.at(-1);
 }
+
+test('WebGL renderer activates after xterm opens and disposes safely on context loss', async () => {
+  const {terminals} = await buildContext({webgl:true});
+  const terminal = terminals[0];
+  assert.equal(terminal.opened, true);
+  const addon = terminal.loadedAddons.find(item => typeof item.contextLossHandler === 'function');
+  assert.ok(addon, 'the WebGL addon is loaded');
+  addon.contextLossHandler();
+  assert.equal(addon.disposed, true, 'disposing the addon lets xterm restore its built-in renderer');
+});
 
 test('a scheduled attempt is never abandoned when the pane is not measurable', async () => {
   const {context, clock, elements} = await buildContext();

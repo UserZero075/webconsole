@@ -65,10 +65,19 @@ if launcher != 'terminal':
                     'current approvals.'
                 )
     elif launcher == 'opencode':
-        # OpenCode merges inline config with existing user/project config.
+        # Isolate this instance so its per-session plugin and event directory
+        # cannot be swallowed by an unrelated shared OpenCode service.
+        command.append('--standalone')
+        if os.environ.get('WEBCONSOLE_OPENCODE_CONTINUE') == '1':
+            command.append('--continue')
+        # OpenCode V2 merges inline config with existing user/project config.
         config = json.loads(os.environ.get('OPENCODE_CONFIG_CONTENT') or '{}')
-        plugins = config.setdefault('plugin', [])
-        plugin = (Path(__file__).resolve().parent.parent / 'integrations' / 'opencode.mjs').as_uri()
+        plugins = config.setdefault('plugins', [])
+        if not isinstance(plugins, list):
+            raise ValueError('La configuración plugins de OpenCode debe ser una lista.')
+        legacy_plugin = (Path(__file__).resolve().parent.parent / 'integrations' / 'opencode.mjs').as_uri()
+        plugins[:] = [entry for entry in plugins if entry != legacy_plugin]
+        plugin = (Path(__file__).resolve().parent.parent / 'integrations' / 'opencode').as_uri()
         if plugin not in plugins:
             plugins.append(plugin)
         if os.environ.get('WEBCONSOLE_PROJECT_ID'):
@@ -90,8 +99,9 @@ if launcher != 'terminal':
         # Reapply the chosen directory after loading the login profile.
         shell_command = 'cd -- ' + shlex.quote(info['cwd']) + ' && exec ' + shlex.join(command)
         result = subprocess.run(['bash', '-lc', shell_command])
-        emit({'type': 'completed' if result.returncode == 0 else 'error', 'agent': launcher,
-              'message': f'{launcher}: el proceso terminó (código {result.returncode})'})
+        if result.returncode != 0:
+            emit({'type': 'error', 'agent': launcher,
+                  'message': f'{launcher}: el proceso terminó con error (código {result.returncode})'})
     except OSError as error:
         print(f'No se pudo iniciar {launcher}: {error}', flush=True)
 elif info.get('session_role') == 'workspace_shell':

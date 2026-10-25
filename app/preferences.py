@@ -17,7 +17,7 @@ _CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f]')
 DEFAULTS = {
     'brand_name': 'WebConsole',
     'accent_color': '#8acfb3',
-    'terminal_background': '#1a1a2e',
+    'terminal_background': '#0b0b0d',
 }
 FIELDS = tuple(DEFAULTS)
 MAX_BRAND_LENGTH = 80

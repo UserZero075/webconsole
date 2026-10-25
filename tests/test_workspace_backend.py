@@ -231,6 +231,22 @@ def test_workspace_file_api_blocks_traversal_symlinks_binary_and_detects_conflic
         WorkspaceFiles(swapped)
 
 
+def test_workspace_file_listing_does_not_require_read_access_to_filesystem_root(tmp_path, monkeypatch):
+    root = tmp_path / 'repo'
+    root.mkdir()
+    (root / 'README.md').write_text('available')
+    real_open = os.open
+
+    def deny_root_read(path, flags, *args, **kwargs):
+        if os.fspath(path) == os.sep and flags & os.O_DIRECTORY and not flags & os.O_PATH:
+            raise PermissionError('filesystem root is traversable but not readable')
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'open', deny_root_read)
+    listing = WorkspaceFiles(root).list()
+    assert [entry['name'] for entry in listing['entries']] == ['README.md']
+
+
 def _git(directory, *args, env=None):
     merged = os.environ.copy()
     merged.update({'GIT_AUTHOR_NAME': 'WebConsole Test', 'GIT_AUTHOR_EMAIL': 'test@example.com',
@@ -718,6 +734,13 @@ def test_static_assets_are_fingerprinted_cached_and_gzipped(monkeypatch):
     assert b'id="terminal-loading"' in gzip.decompress(html.data)
 
 
+def test_workspace_templates_auto_reload_when_source_changes():
+    import server
+
+    assert server.app.config['TEMPLATES_AUTO_RELOAD'] is True
+    assert server.app.jinja_env.auto_reload is True
+
+
 def test_embedded_terminal_loader_and_resize_contracts():
     server = (ROOT / 'app' / 'server.py').read_text()
     workspace = (ROOT / 'static' / 'js' / 'workspace.js').read_text()
@@ -747,6 +770,10 @@ def test_embedded_terminal_loader_and_resize_contracts():
     assert 'syncTerminalScrollbarWidth' in console_html
     assert 'coreViewport.scrollBarWidth = Math.max(0, viewport.offsetWidth - viewport.clientWidth)' in console_html
     assert 'https://fonts.googleapis.com' not in console_html
+    assert 'lineHeight: 1.0' in console_html
+    assert "xterm-addon-webgl-016.js?v={{ asset_version('js/lib/xterm-addon-webgl-016.js') }}" in console_html
+    assert 'xterm-addon-webgl-017.js' not in console_html
+    assert 'addon.onContextLoss(() =>' in console_html
     assert '.embedded-terminal .terminal-wrapper {padding: 0; width: 100%; height: 100%; background: var(--bg-terminal)}' in console_css
     assert '.embedded-terminal .xterm {\n    height: 100%;\n    width: 100%;\n    margin: 0;\n    padding: 0;\n}' in console_css
     assert '.embedded-terminal .xterm-viewport {width: 100%}' in console_css
@@ -756,7 +783,7 @@ def test_embedded_terminal_loader_and_resize_contracts():
     assert '.embedded-terminal .xterm-viewport::-webkit-scrollbar {width: 0; height: 0}' in console_css
     assert 'html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .terminal-wrapper {background-color: var(--bg-terminal)}' in console_css
     assert 'html.embedded-terminal-document .terminal-app { display:flex; width:100%; height:100%; min-height:0; flex-direction:column; background:{{ preferences.terminal_background }}; }' in console_html
-    assert '--terminal-background: #1a1a2e' in workspace_css
+    assert '--terminal-background: #0b0b0d' in workspace_css
     assert '.work-surface {position:relative; min-width:0; min-height:0; flex:1 1 0; overflow:hidden; background:var(--terminal-background); box-sizing:border-box}' in workspace_css
     assert '.work-surface iframe {position:absolute; inset:0; display:block; width:100%; height:100%; min-width:0; min-height:0; border:0; margin:0; padding:0; box-sizing:border-box; background:var(--terminal-background)}' in workspace_css
     assert '.workspace-terminal {height:35px; flex:0 0 35px; min-height:0; display:flex; flex-direction:column; overflow:hidden; background:#151618}' in workspace_css

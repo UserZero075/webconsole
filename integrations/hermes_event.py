@@ -29,7 +29,7 @@ def main():
             elif payload.get('failed'):
                 kind, message = 'error', 'El turno de Hermes terminó con un error'
             elif payload.get('interrupted'):
-                kind, message = 'idle', 'El turno de Hermes fue interrumpido'
+                kind, message = 'interrupted', 'El turno de Hermes fue interrumpido'
         if kind:
             emit({'type': kind, 'agent': 'hermes', 'message': message})
     except (OSError, ValueError, IndexError):

@@ -39,7 +39,10 @@ from telemetry import Telemetry
 from projects import ProjectError, ProjectStore
 from git_service import (GitError, create_worktree, fetch as git_fetch, inspect as inspect_git, run_git,
                          read_diff as read_git_diff, remove_worktree as git_remove_worktree,
-                         clone_repository, switch_to_new_branch, push_branch)
+                         clone_repository, switch_to_new_branch, push_branch,
+                         stage_paths as git_stage_paths, unstage_paths as git_unstage_paths,
+                         discard_paths as git_discard_paths, commit_staged as git_commit_staged,
+                         diff_stats as git_diff_stats, commit_history as git_commit_history)
 from filesystem import FileAccessError, WorkspaceFiles, MAX_FILE_BYTES
 from coordination import CoordinationError, CoordinationStore, new_coordination_token
 from attachments import AttachmentError, AttachmentStore, MAX_REQUEST_BYTES as MAX_ATTACHMENT_REQUEST_BYTES
@@ -47,7 +50,9 @@ from handoffs import HandoffError, HandoffStore, MAX_EXPORT_BYTES as MAX_HANDOFF
 from host_directories import DirectoryError, list_directories, resolve_directory
 from github_service import (GitHubError, status as github_status, repositories as github_repositories,
                             branches as github_branches, validate_public_url,
-                            repository_permission, resolve_gh)
+                            repository_permission, resolve_gh,
+                            create_pull_request as github_create_pull_request,
+                            validate_pull_request_request as github_validate_pull_request_request)
 from preferences import PreferencesError, PreferencesStore, DEFAULTS as PREFERENCE_DEFAULTS
 from log_safety import install_access_log_redaction
 
@@ -58,6 +63,7 @@ STATIC_ROOT = Path(app.static_folder).resolve()
 app.config.update(
     SECRET_KEY=os.environ.get('SECRET_KEY', secrets.token_hex(32)),
     MAX_CONTENT_LENGTH=max(MAX_FILE_BYTES * 6 + 65536, MAX_ATTACHMENT_REQUEST_BYTES),
+    TEMPLATES_AUTO_RELOAD=True,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Strict',
     SESSION_COOKIE_SECURE=os.environ.get('COOKIE_SECURE', '0') == '1',
@@ -1918,6 +1924,97 @@ def api_workspace_fetch(workspace_id):
         return jsonify({'error': str(error)}), 400
 
 
+@app.route('/api/workspaces/<workspace_id>/git/actions', methods=['POST'])
+def api_workspace_git_action(workspace_id):
+    project, workspace = PROJECT_STORE.get_workspace(workspace_id)
+    if not project or not workspace:
+        abort(404)
+    files = get_workspace_files(workspace_id)
+    if files is None:
+        return jsonify({'error': 'El workspace ya no está disponible.'}), 404
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        abort(400)
+    action = payload.get('action')
+    try:
+        if action == 'stage':
+            git = git_stage_paths(workspace['path'], files, payload.get('paths'))
+        elif action == 'unstage':
+            git = git_unstage_paths(workspace['path'], files, payload.get('paths'))
+        elif action == 'discard':
+            git = git_discard_paths(workspace['path'], files, payload.get('paths'))
+        elif action == 'commit':
+            git = git_commit_staged(workspace['path'], payload.get('message'))
+        else:
+            return jsonify({'error': 'Acción de Git no válida.'}), 400
+        return jsonify({'success': True, 'git': git})
+    except FileAccessError as error:
+        return jsonify({'error': str(error)}), error.status
+    except GitError as error:
+        return jsonify({'error': str(error)}), 409
+
+
+@app.route('/api/workspaces/<workspace_id>/git/stats')
+def api_workspace_git_stats(workspace_id):
+    project, workspace = PROJECT_STORE.get_workspace(workspace_id)
+    if not project or not workspace:
+        abort(404)
+    files = get_workspace_files(workspace_id)
+    if files is None:
+        return jsonify({'error': 'El workspace ya no está disponible.'}), 404
+    try:
+        return jsonify({'stats': git_diff_stats(workspace['path'], files)})
+    except GitError as error:
+        return jsonify({'error': str(error)}), 409
+
+
+@app.route('/api/workspaces/<workspace_id>/git/history')
+def api_workspace_git_history(workspace_id):
+    project, workspace = PROJECT_STORE.get_workspace(workspace_id)
+    if not project or not workspace:
+        abort(404)
+    try:
+        return jsonify({'commits': git_commit_history(workspace['path'])})
+    except GitError as error:
+        return jsonify({'error': str(error)}), 409
+
+
+@app.route('/api/workspaces/<workspace_id>/pull-request', methods=['POST'])
+def api_workspace_pull_request(workspace_id):
+    project, workspace = PROJECT_STORE.get_workspace(workspace_id)
+    if not project or not workspace:
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        abort(400)
+    try:
+        git = inspect_git(workspace['path'])
+        if not git.get('is_git') or git.get('detached'):
+            return jsonify({'error': 'Selecciona una rama local antes de crear un Pull Request.'}), 409
+        if git.get('branch') == git.get('default_branch'):
+            return jsonify({'error': 'Cambia a una rama de trabajo antes de crear un Pull Request.'}), 409
+        if not any(remote.get('name') == 'origin' and remote.get('provider') == 'github'
+                   for remote in git.get('remotes', [])):
+            return jsonify({'error': 'Este workspace necesita un remoto origin de GitHub para publicar la rama.'}), 409
+        base = payload.get('base')
+        if not isinstance(base, str) or base == git.get('branch'):
+            return jsonify({'error': 'La rama base debe ser distinta de la rama actual.'}), 400
+        title = payload.get('title')
+        body = payload.get('body', '')
+        github_validate_pull_request_request(workspace['path'], git['branch'], base, title, body)
+        account = github_status()
+        if not account.get('authenticated'):
+            return jsonify({'error': account.get('message') or 'Inicia sesión en gh para crear un Pull Request.'}), 400
+        push_branch(workspace['path'], git['branch'])
+        result = github_create_pull_request(workspace['path'], git['branch'], base,
+                                            title, body)
+        return jsonify({'success': True, **result})
+    except GitError as error:
+        return jsonify({'error': str(error)}), 409
+    except GitHubError as error:
+        return jsonify({'error': str(error)}), 400
+
+
 def get_workspace_files(workspace_id):
     project, workspace = PROJECT_STORE.get_workspace(workspace_id)
     if not project or not workspace:
@@ -1935,6 +2032,28 @@ def api_workspace_files(workspace_id):
         return jsonify({'error': 'El workspace ya no está disponible.'}), 404
     try:
         return jsonify(files.list(request.args.get('path', ''), request.args.get('limit', 500)))
+    except FileAccessError as error:
+        return jsonify({'error': str(error)}), error.status
+
+
+@app.route('/api/workspaces/<workspace_id>/search', methods=['POST'])
+def api_workspace_search(workspace_id):
+    files = get_workspace_files(workspace_id)
+    if files is None:
+        return jsonify({'error': 'El workspace ya no está disponible.'}), 404
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        abort(400)
+    try:
+        result = files.search(
+            payload.get('query'), mode=payload.get('mode', 'names'),
+            include=payload.get('include', ''), exclude=payload.get('exclude', ''),
+            case_sensitive=payload.get('case_sensitive') is True,
+            whole_word=payload.get('whole_word') is True,
+            regex=payload.get('regex') is True, show_dotfiles=payload.get('show_dotfiles') is not False,
+            limit=payload.get('limit', 100),
+        )
+        return jsonify(result)
     except FileAccessError as error:
         return jsonify({'error': str(error)}), error.status
 

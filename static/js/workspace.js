@@ -4,8 +4,16 @@ const apiResponseCache = new Map();
 const state = {
     projects: [], sessions: [], workspaceData: null, selectedProjectId: null,
     selectedWorkspaceId: null, selectedSessionId: null, tabs: [], activeTabId: null,
-    mobileSurface: 'agents', mobileFilesBrowser: false,
+    mobileSurface: 'agents', mobileFilesBrowser: false, inspectorTab: 'files',
+    sidebarVisibility: {projects:true, inspector:true},
+    browserNotificationsEnabled: false, notificationFingerprints: new Map(),
+    notificationFingerprintBaselineReady: false, notificationTrackingStartedAt: Date.now(),
+    explorerMode: 'names', historyScope: 'workspace', searchGeneration: 0,
+    gitStats: {}, gitStatsWorkspaceId: null, gitHistory: [], gitHistoryWorkspaceId: null,
+    nameSearchResponse: null, nameSearchWorkspaceId: null, gitCommitDrafts: new Map(),
+    gitCommitDraftWorkspaceId: null,
     expandedProjects: new Set(), expandedWorkspaces: new Set(), directoryCache: new Map(),
+    gitCollapsedSections: new Set(), showDotfiles: true,
     workspacesByProject: new Map(), workspaceLoads: new Map(), projectsLoaded: false,
     terminalViews: new Map(),
     fileGeneration: 0, frameSessionId: null, pendingAction: null, actionTimer: null,
@@ -21,6 +29,9 @@ const state = {
     preferences: null,
 };
 const WORKSPACE_INVENTORY_REFRESH_MS = 5 * 60 * 1000;
+const SESSION_NOTIFICATION_POLL_MS = 5000;
+const BROWSER_NOTIFICATIONS_KEY = 'webconsole.browserNotifications';
+const NOTIFICATION_FINGERPRINTS_KEY = 'webconsole.agentNotificationFingerprints';
 const launcherNames = {opencode: 'OpenCode', codex: 'Codex', hermes: 'Hermes', terminal: 'Terminal'};
 let currentEditorView = null;
 let currentEditorTabId = null;
@@ -31,6 +42,7 @@ let navigationTimer = null;
 let restoringNavigation = false;
 let markdownTimer = null;
 let githubSearchTimer = null;
+let workspaceSearchTimer = null;
 const editorBundlePromises = new Map();
 const terminalFrameResizeTimers = new WeakMap();
 const terminalFrameLoadBound = new WeakSet();
@@ -59,6 +71,7 @@ function ensureTerminalView(session) {
     if (!frame) {
         frame = document.createElement('iframe');
         frame.title = `Terminal de ${session.title || agentName(session)}`;
+        frame.allow = 'clipboard-write';
         frame.hidden = true;
         frame.dataset.sessionId = session.id;
         $('work-surface').append(frame);
@@ -194,18 +207,104 @@ function sessionFor(id) {
 function inventoryRefreshDue(now = Date.now()) {
     return !state.nextInventoryRefreshAt || now >= state.nextInventoryRefreshAt;
 }
+function setSidebarVisibility(side, visible, {persist = true} = {}) {
+    if (!['projects', 'inspector'].includes(side)) return false;
+    const isVisible = Boolean(visible);
+    state.sidebarVisibility[side] = isVisible;
+    const isProjects = side === 'projects';
+    const workbench = $('workbench');
+    const collapse = $(isProjects ? 'collapse-project-sidebar' : 'collapse-inspector-sidebar');
+    const restore = $(isProjects ? 'restore-project-sidebar' : 'restore-inspector-sidebar');
+    const label = `${isVisible ? 'Ocultar' : 'Mostrar'} ${isProjects ? 'proyectos' : 'inspector'}`;
+    workbench?.classList.toggle(isProjects ? 'project-sidebar-hidden' : 'inspector-hidden', !isVisible);
+    for (const button of [collapse, restore]) {
+        button?.setAttribute('aria-expanded', String(isVisible));
+        button?.setAttribute('aria-label', label);
+        button?.setAttribute('title', label);
+    }
+    if (collapse) collapse.hidden = !isVisible;
+    if (restore) restore.hidden = isVisible;
+    if (persist) {
+        try { localStorage.setItem(`webconsole.${isProjects ? 'project' : 'inspector'}SidebarHidden`, String(!isVisible)); } catch (_) {}
+    }
+    return true;
+}
+
+function toggleSidebarVisibility(side) {
+    if (window.innerWidth <= 1050) return;
+    const visible = !state.sidebarVisibility[side];
+    setSidebarVisibility(side, visible);
+    const target = $(visible
+        ? side === 'projects' ? 'collapse-project-sidebar' : 'collapse-inspector-sidebar'
+        : side === 'projects' ? 'restore-project-sidebar' : 'restore-inspector-sidebar');
+    target?.focus({preventScroll:true});
+}
+
+const INSPECTOR_TABS = [
+    {id:'files', button:'inspector-tab-files', panel:'explorer-section'},
+    {id:'history', button:'inspector-tab-history', panel:'history-section'},
+    {id:'git', button:'inspector-tab-git', panel:'git-section'},
+    {id:'messages', button:'inspector-tab-messages', panel:'message-section'},
+];
+function setInspectorTab(tab, {focus = false, persist = true} = {}) {
+    if (!INSPECTOR_TABS.some(item => item.id === tab)) return false;
+    state.inspectorTab = tab;
+    for (const item of INSPECTOR_TABS) {
+        const selected = item.id === tab;
+        const button = $(item.button);
+        const panel = $(item.panel);
+        button?.setAttribute('aria-selected', String(selected));
+        if (button) button.tabIndex = selected ? 0 : -1;
+        if (panel) panel.hidden = !selected;
+    }
+    if (persist) {
+        try { localStorage.setItem('webconsole.inspectorTab', tab); } catch (_) {}
+    }
+    if (focus) $(INSPECTOR_TABS.find(item => item.id === tab)?.button)?.focus();
+    return true;
+}
+function setExplorerMode(mode, {focus = false} = {}) {
+    if (!['names', 'content'].includes(mode)) return false;
+    state.explorerMode = mode;
+    for (const button of document.querySelectorAll('[data-explorer-mode]')) {
+        const selected = button.dataset.explorerMode === mode;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-pressed', String(selected));
+    }
+    $('explorer-names-panel').hidden = mode !== 'names';
+    $('explorer-content-panel').hidden = mode !== 'content';
+    if (focus) $(mode === 'names' ? 'file-search' : 'content-search')?.focus();
+    if (mode === 'content' && $('content-search').value.trim()) runWorkspaceSearch();
+    return true;
+}
+function handleInspectorTabKeydown(event) {
+    const button = event.target.closest?.('[data-inspector-tab]');
+    const index = INSPECTOR_TABS.findIndex(item => item.id === button?.dataset.inspectorTab);
+    if (index < 0) return;
+    let nextIndex;
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % INSPECTOR_TABS.length;
+    else if (event.key === 'ArrowLeft') nextIndex = (index + INSPECTOR_TABS.length - 1) % INSPECTOR_TABS.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = INSPECTOR_TABS.length - 1;
+    else return;
+    event.preventDefault();
+    setInspectorTab(INSPECTOR_TABS[nextIndex].id, {focus:true});
+}
 function mobileViewport() {
     return window.matchMedia('(max-width:650px)').matches;
 }
 function setMobileSurface(surface, {filesBrowser} = {}) {
-    if (!['agents', 'files', 'git', 'messages'].includes(surface)) return;
+    if (!['agents', 'files', 'history', 'git', 'messages'].includes(surface)) return;
     if (surface === 'files') {
         const tab = activeTab();
         state.mobileFilesBrowser = filesBrowser ?? (tab?.type !== 'file');
     } else state.mobileFilesBrowser = false;
     state.mobileSurface = surface;
+    if (['history', 'git', 'messages'].includes(surface) || surface === 'files' && state.mobileFilesBrowser) {
+        setInspectorTab(surface === 'files' ? 'files' : surface);
+    }
     document.body.classList.remove('mobile-keyboard-open');
-    for (const name of ['agents', 'files', 'git', 'messages']) {
+    for (const name of ['agents', 'files', 'history', 'git', 'messages']) {
         document.body.classList.toggle(`mobile-surface-${name}`, surface === name);
     }
     document.body.classList.toggle('mobile-files-browser', surface === 'files' && state.mobileFilesBrowser);
@@ -251,17 +350,179 @@ function agentName(session) {
     return session?.agent?.name || launcherNames[session?.launcher] || 'Terminal';
 }
 function stateLabel(session) {
-    if (!session) return 'Desconectado';
-    if (session.state === 'permission' || session.notification?.kind === 'permission') return 'Necesita permiso';
-    if (session.state === 'working') return 'Trabajando';
-    if (session.state === 'ended' || session.is_active === false) return 'Finalizada';
-    return 'En espera';
+    return agentIndicator(session).label;
 }
+function agentIndicator(session) {
+    if (!session) return {status:'idle', label:'Desconectado', estimated:false};
+    const notice = session.notification;
+    const current = session.state || 'idle';
+    const estimated = session.state_source === 'estimated';
+    if (current === 'working') {
+        if (estimated) return {status:'unconfirmed', label:'Actividad detectada · turno no confirmado', estimated:true};
+        return {status:'working', label:'Trabajando', estimated:false};
+    }
+    if (current === 'done') {
+        return estimated
+            ? {status:'unconfirmed', label:'Finalización no confirmada', estimated:true}
+            : {status:'done', label:'Turno completado', estimated:false};
+    }
+    if (current === 'failed') {
+        return estimated
+            ? {status:'unconfirmed', label:'Error no confirmado', estimated:true}
+            : {status:'failed', label:'Error del agente', estimated:false};
+    }
+    if (notice?.kind === 'completed' && notice.source === 'process'
+            && (!session.state || current === 'ended'
+                || (current === 'idle' && (!session.state_source || session.state_source === 'process')))) {
+        return {status:'ended', label:'Proceso finalizado', estimated:false};
+    }
+    if (current === 'ended' || session.ended === true || session.is_active === false) {
+        return {status:'ended', label:'Sesión finalizada', estimated:false};
+    }
+    if (current === 'permission' || notice?.kind === 'permission') {
+        const likely = estimated || notice?.source === 'screen';
+        return {status:'permission', label:likely ? 'Posible solicitud de permiso' : 'Necesita permiso', estimated:likely};
+    }
+    if (current === 'interrupted' || notice?.kind === 'interrupted') {
+        return {status:'interrupted', label:'Interrumpido', estimated:false};
+    }
+    if (current === 'unconfirmed' || notice?.kind === 'unconfirmed') {
+        return {status:'unconfirmed', label:'No se pudo confirmar', estimated:true};
+    }
+    if (current === 'monitoring') return {status:'monitoring', label:'Supervisando en segundo plano', estimated:false};
+    if (!session.state && notice?.kind === 'error') return {status:'failed', label:'Error del agente', estimated:false};
+    if (!session.state && notice?.kind === 'completed' && notice.source === 'event') {
+        return {status:'done', label:'Turno completado', estimated:false};
+    }
+    if (current === 'idle' && estimated) {
+        return {status:'unconfirmed', label:'Turno no confirmado', estimated:true};
+    }
+    return {status:'idle', label:'En espera', estimated:false};
+}
+
+function formatAgentNotification(session, notice) {
+    const name = agentName(session);
+    let title;
+    let body = notice.message || '';
+    if (notice.kind === 'completed') {
+        if (notice.source === 'process') {
+            title = `${name} finalizó su proceso`;
+            body = `${body}${body ? ' ' : ''}El fin del proceso no confirma por sí solo que la tarea esté completa.`;
+        } else title = `${name} terminó su turno`;
+    } else if (notice.kind === 'permission') {
+        title = notice.source === 'screen' ? `${name} podría necesitar asistencia` : `${name} necesita tu permiso`;
+        if (notice.source === 'screen') body = `Detección estimada en pantalla: ${body}`;
+    } else if (notice.kind === 'error') title = `${name} notificó un error`;
+    else return null;
+    return {title, body};
+}
+
+function showAgentBrowserNotification(session, notice) {
+    const NotificationAPI = window.Notification;
+    if (!state.browserNotificationsEnabled || !NotificationAPI || NotificationAPI.permission !== 'granted') return false;
+    const content = formatAgentNotification(session, notice);
+    if (!content) return false;
+    try {
+        const popup = new NotificationAPI(content.title, {
+            body: content.body,
+            tag: `${session.id}:${notice.fingerprint}`,
+        });
+        popup.onclick = () => {
+            window.focus();
+            popup.close?.();
+        };
+        return true;
+    } catch (_) { return false; }
+}
+
+function persistAgentNotificationFingerprints() {
+    try {
+        localStorage.setItem(NOTIFICATION_FINGERPRINTS_KEY, JSON.stringify(Object.fromEntries(state.notificationFingerprints)));
+    } catch (_) {}
+}
+
+function processAgentNotifications(sessions) {
+    for (const session of sessions || []) {
+        if (!session?.id) continue;
+        const notice = session.notification;
+        const fingerprint = typeof notice?.fingerprint === 'string' && notice.fingerprint ? notice.fingerprint : null;
+        const known = state.notificationFingerprints;
+        const wasKnown = known.has(session.id);
+        const noticeAt = Number(notice?.at);
+        const newSessionEvent = !wasKnown && Number.isFinite(noticeAt)
+            && noticeAt * 1000 >= state.notificationTrackingStartedAt;
+        const changedNotice = state.notificationFingerprintBaselineReady && wasKnown
+            && fingerprint && fingerprint !== known.get(session.id);
+        if (fingerprint && (changedNotice || newSessionEvent)) {
+            showAgentBrowserNotification(session, notice);
+        }
+        known.set(session.id, fingerprint);
+    }
+    state.notificationFingerprintBaselineReady = true;
+    persistAgentNotificationFingerprints();
+}
+
+function syncBrowserNotificationControls() {
+    const toggle = $('pref-browser-notifications');
+    const status = $('browser-notifications-status');
+    const NotificationAPI = window.Notification;
+    if (toggle) {
+        toggle.checked = state.browserNotificationsEnabled;
+        toggle.disabled = !NotificationAPI || NotificationAPI.permission === 'denied';
+    }
+    if (!status) return;
+    if (!NotificationAPI) status.textContent = 'Este navegador no admite notificaciones del sistema.';
+    else if (NotificationAPI.permission === 'denied') status.textContent = 'El navegador las bloqueó. Cambia el permiso de este sitio en la configuración del navegador.';
+    else if (state.browserNotificationsEnabled) status.textContent = 'Activas para nuevas finalizaciones y solicitudes de asistencia.';
+    else if (NotificationAPI.permission === 'granted') status.textContent = 'Permiso concedido; activa la opción para recibir avisos.';
+    else status.textContent = 'Al activarlas, el navegador solicitará permiso. No se concede automáticamente.';
+}
+
+function loadAgentNotificationPreferences() {
+    try {
+        state.browserNotificationsEnabled = localStorage.getItem(BROWSER_NOTIFICATIONS_KEY) === 'true';
+        const saved = JSON.parse(localStorage.getItem(NOTIFICATION_FINGERPRINTS_KEY) || 'null');
+        if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+            state.notificationFingerprints = new Map(Object.entries(saved).filter(([, value]) => value === null || typeof value === 'string'));
+            state.notificationFingerprintBaselineReady = true;
+        }
+    } catch (_) {}
+    const NotificationAPI = window.Notification;
+    if (!NotificationAPI || NotificationAPI.permission !== 'granted') state.browserNotificationsEnabled = false;
+    syncBrowserNotificationControls();
+}
+
+function setBrowserNotificationsEnabled(enabled) {
+    state.browserNotificationsEnabled = Boolean(enabled);
+    try { localStorage.setItem(BROWSER_NOTIFICATIONS_KEY, String(state.browserNotificationsEnabled)); } catch (_) {}
+    syncBrowserNotificationControls();
+}
+
+async function handleBrowserNotificationPreferenceChange(event) {
+    const toggle = event.currentTarget;
+    if (!toggle.checked) {
+        setBrowserNotificationsEnabled(false);
+        return;
+    }
+    const NotificationAPI = window.Notification;
+    if (!NotificationAPI) {
+        setBrowserNotificationsEnabled(false);
+        return;
+    }
+    try {
+        const permission = NotificationAPI.permission === 'default'
+            ? await NotificationAPI.requestPermission() : NotificationAPI.permission;
+        setBrowserNotificationsEnabled(permission === 'granted');
+    } catch (_) {
+        setBrowserNotificationsEnabled(false);
+    }
+}
+
 function projectWorkspace(projectId, workspaceId) {
     if (state.workspaceData?.project?.id === projectId) {
         return state.workspaceData.workspaces.find(item => item.id === workspaceId) || null;
     }
-    return null;
+    return state.workspacesByProject.get(projectId)?.workspaces?.find(item => item.id === workspaceId) || null;
 }
 
 async function refreshAll({refreshOpen = false} = {}) {
@@ -280,6 +541,8 @@ async function refreshAll({refreshOpen = false} = {}) {
             state.projectsLoaded = true;
         }
         state.sessions = sessionData.sessions || [];
+        processAgentNotifications(state.sessions);
+        renderAgentHistory();
         if (!state.projects.some(item => item.id === state.selectedProjectId)) {
             state.selectedProjectId = state.projects[0]?.id || null;
             state.workspaceData = null;
@@ -325,8 +588,9 @@ async function refreshAll({refreshOpen = false} = {}) {
     } finally {
         state.busy = false;
         if (!document.hidden) {
-            const delay = Math.max(0, state.nextInventoryRefreshAt - Date.now());
-            state.pollTimer = setTimeout(() => refreshAll({refreshOpen:true}), delay);
+            const inventoryDelay = Math.max(0, state.nextInventoryRefreshAt - Date.now());
+            const delay = Math.min(SESSION_NOTIFICATION_POLL_MS, inventoryDelay);
+            state.pollTimer = setTimeout(() => refreshAll({refreshOpen:inventoryRefreshDue()}), delay);
         }
     }
 }
@@ -369,9 +633,14 @@ async function loadWorkspaces(projectId, {force = false} = {}) {
     }
     if (state.selectedWorkspaceId) state.expandedWorkspaces.add(state.selectedWorkspaceId);
     state.directoryCache.clear();
+    state.searchGeneration++;
+    state.nameSearchResponse = null;
+    state.nameSearchWorkspaceId = null;
     renderTree();
     renderCenter();
     renderWorkspaceChrome();
+    if (state.explorerMode === 'names' && $('file-search').value.trim()) scheduleWorkspaceSearch('names');
+    else if (state.explorerMode === 'content' && $('content-search').value.trim()) scheduleWorkspaceSearch('content');
     await Promise.all([loadDirectory(''), refreshMessagesAndGit()]);
 }
 
@@ -424,6 +693,9 @@ function selectWorkspace(workspaceId) {
     if (!workspace) return;
     state.selectedWorkspaceId = workspaceId;
     state.expandedWorkspaces.add(workspaceId);
+    state.searchGeneration++;
+    state.nameSearchResponse = null;
+    state.nameSearchWorkspaceId = null;
     const tab = activeTab();
     const associated = tab?.type === 'terminal' ? (sessionFor(tab.sessionId) || tab.session)?.workspace_id : tab?.workspaceId;
     if (associated && associated !== workspaceId) state.activeTabId = null;
@@ -431,6 +703,8 @@ function selectWorkspace(workspaceId) {
     renderTree();
     renderCenter();
     renderWorkspaceChrome();
+    if (state.explorerMode === 'names' && $('file-search').value.trim()) scheduleWorkspaceSearch('names');
+    else if (state.explorerMode === 'content' && $('content-search').value.trim()) scheduleWorkspaceSearch('content');
     loadDirectory('');
     refreshWorkspaceAgentCounts();
     if (window.matchMedia('(max-width:650px)').matches) closeMobileDrawers(true);
@@ -460,7 +734,7 @@ function updateMobileDrawerState() {
     if (!inspectorDrawer) document.body.classList.remove('inspector-open');
     const projectsOpen = projectsDrawer && projects.classList.contains('open');
     const inspectorSurface = projectsDrawer && (
-        ['git', 'messages'].includes(state.mobileSurface)
+        ['history', 'git', 'messages'].includes(state.mobileSurface)
         || state.mobileSurface === 'files' && state.mobileFilesBrowser
     );
     const inspectorOpen = inspectorDrawer && document.body.classList.contains('inspector-open');
@@ -469,7 +743,7 @@ function updateMobileDrawerState() {
     projectsButton?.setAttribute('aria-expanded', String(projectsOpen));
     projectsButton?.setAttribute('aria-label', projectsOpen ? 'Ocultar proyectos' : 'Mostrar proyectos');
     inspectorButton?.setAttribute('aria-expanded', String(inspectorOpen));
-    inspectorButton?.setAttribute('aria-label', inspectorOpen ? 'Ocultar archivos' : 'Mostrar archivos');
+    inspectorButton?.setAttribute('aria-label', inspectorOpen ? 'Ocultar inspector' : 'Mostrar inspector');
     projects.inert = projectsDrawer && !projectsOpen;
     inspector.inert = inspectorDrawer && !inspectorOpen && !inspectorSurface;
     const backdrop = $('mobile-drawer-backdrop');
@@ -1095,9 +1369,12 @@ function renderTree() {
                     for (const agent of filtered) {
                         const agentRow = node('div', `agent-row ${state.selectedSessionId === agent.id ? 'active' : ''}`);
                         const select = node('button', 'agent-select'); select.type = 'button';
-                        const statusClass = agent.state === 'working' ? 'working' : agent.state === 'permission' ? 'permission' : agent.state === 'ended' ? 'ended' : '';
-                        select.append(node('span', `agent-state ${statusClass}`), node('span', 'agent-name', agent.title || agentName(agent)));
-                        select.title = `${agentName(agent)} · ${stateLabel(agent)} · ${agent.id}`;
+                        const indicator = agentIndicator(agent);
+                        const statusDot = node('span', `agent-state ${indicator.status}${indicator.estimated ? ' estimated' : ''}`);
+                        statusDot.setAttribute('aria-hidden', 'true');
+                        select.append(statusDot, node('span', 'agent-name', agent.title || agentName(agent)));
+                        select.title = `${agentName(agent)} · ${indicator.label} · ${agent.id}`;
+                        select.setAttribute('aria-label', `${agent.title || agentName(agent)} · ${indicator.label}`);
                         select.addEventListener('click', () => openTerminal(agent));
                         bindContextMenu(agentRow, select, 'session', agent);
                         const menu = node('button', 'agent-menu', '⋯'); menu.type = 'button'; menu.title = 'Acciones del agente'; menu.setAttribute('aria-label', `Acciones de ${agentName(agent)}`);
@@ -1123,7 +1400,12 @@ function renderTree() {
         for (const session of unassigned) {
             const agentRow = node('div', `agent-row ${state.selectedSessionId === session.id ? 'active' : ''}`);
             const select = node('button', 'agent-select'); select.type = 'button';
-            select.append(node('span', `agent-state ${session.state === 'working' ? 'working' : ''}`), node('span', 'agent-name', session.title || agentName(session)));
+            const indicator = agentIndicator(session);
+            const statusDot = node('span', `agent-state ${indicator.status}${indicator.estimated ? ' estimated' : ''}`);
+            statusDot.setAttribute('aria-hidden', 'true');
+            select.append(statusDot, node('span', 'agent-name', session.title || agentName(session)));
+            select.title = `${agentName(session)} · ${indicator.label} · ${session.id}`;
+            select.setAttribute('aria-label', `${session.title || agentName(session)} · ${indicator.label}`);
             select.addEventListener('click', () => openTerminal(session));
             bindContextMenu(agentRow, select, 'session', session);
             const menu = node('button', 'agent-menu', '⋯'); menu.type = 'button'; menu.title = 'Opciones de la sesión';
@@ -1139,16 +1421,15 @@ function renderTree() {
 function renderWorkspaceChrome() {
     const project = selectedProject();
     const workspace = selectedWorkspace();
-    $('top-project').textContent = project?.name || 'Sin proyecto seleccionado';
-    $('top-workspace').textContent = workspace ? `${workspace.name}${workspace.git?.branch ? ` · ${workspace.git.branch}` : ''}` : '';
     $('work-title').textContent = workspace?.name || project?.name || 'Workspace';
     $('work-subtitle').textContent = workspace ? `${workspace.path}${workspace.git?.branch ? ` · ${workspace.git.branch}` : ''}` : 'Selecciona un proyecto';
     $('workspace-path').textContent = workspace?.path || '';
-    $('add-agent').disabled = !workspace;
+    renderExplorerWorkspacePicker();
     $('new-worktree').disabled = !project || !workspace?.git?.is_git;
     $('branch-picker').disabled = !workspace;
     renderBranchPicker();
     renderGit();
+    renderAgentHistory();
     renderRecipientPicker();
     renderWorkspaceTerminal();
     renderAgentControls();
@@ -1402,7 +1683,7 @@ function openTerminal(session) {
 }
 
 function renderTabs() {
-    const strip = $('tab-strip');
+    const strip = $('workspace-tabs');
     const fragment = document.createDocumentFragment();
     for (const tab of state.tabs) {
         const wrapper = node('div', `tab ${tab.id === state.activeTabId ? 'active' : ''}`);
@@ -1487,6 +1768,118 @@ function closeTab(tabId) {
     } else renderTabs();
 }
 
+const GIT_STATUS_LABELS = {modified:'M', added:'A', deleted:'D', renamed:'R', untracked:'U'};
+const GIT_STATUS_PRIORITY = {copied:1, renamed:2, added:3, untracked:3, modified:4, deleted:5};
+const FILE_NAME_COLLATOR = new Intl.Collator(undefined, {numeric:true, sensitivity:'base'});
+const FILE_ICON_BY_EXTENSION = {
+    js:'javascript', cjs:'javascript', mjs:'javascript',
+    ts:'typescript', cts:'typescript', mts:'typescript', tsx:'typescript',
+    py:'python', pyw:'python', rs:'rust', go:'go',
+    json:'json', json5:'json', jsonc:'json',
+    css:'style', scss:'style', sass:'style', less:'style',
+    html:'markup', htm:'markup', xhtml:'markup', xml:'markup',
+    md:'markdown', mdx:'markdown', rst:'markdown', txt:'text', log:'text',
+    png:'image', jpg:'image', jpeg:'image', gif:'image', svg:'image', webp:'image', ico:'image', avif:'image',
+    sql:'database', db:'database', sqlite:'database', sqlite3:'database',
+    sh:'terminal', bash:'terminal', zsh:'terminal', fish:'terminal', ps1:'terminal', bat:'terminal',
+    yaml:'config', yml:'config', toml:'config', ini:'config', cfg:'config', conf:'config', env:'config',
+    zip:'archive', gz:'archive', bz2:'archive', xz:'archive', tar:'archive', rar:'archive', '7z':'archive',
+    mp3:'audio', wav:'audio', aac:'audio', flac:'audio', ogg:'audio',
+    mp4:'video', mov:'video', webm:'video', mkv:'video', avi:'video',
+    csv:'spreadsheet', tsv:'spreadsheet', xls:'spreadsheet', xlsx:'spreadsheet',
+    diff:'diff', patch:'diff',
+};
+const FILE_ICON_BY_NAME = {
+    'package.json':'package', 'package-lock.json':'package', 'pnpm-lock.yaml':'package', 'yarn.lock':'package', 'bun.lock':'package',
+    dockerfile:'config', makefile:'terminal', readme:'markdown', 'readme.md':'markdown',
+    '.gitignore':'config', '.gitattributes':'config', '.editorconfig':'config',
+};
+const FILE_ICON_PATHS = {
+    generic:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.25 8h5.5M5.25 10.25h5.5'],
+    folder:['M1.5 4h4l1.5 1.6h7.5v7.9h-13z','M1.75 6h12.5'],
+    'folder-open':['M1.5 5h4l1.5 1.3h7.5l-1.3 6.2h-12.2z','M2 6.3l1 5.8'],
+    symlink:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5 10.5l2-2 1.3 1.3L11 7'],
+    javascript:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M6 7.5v3.1c0 .8.5 1.1 1.2.8M9 7.5v4'],
+    typescript:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.2 7.7h3M6.7 7.7v3.8M9.1 10.7c.4.7 1.8.7 2 0 .2-.7-1.8-.8-1.6-1.7.1-.6 1.2-.7 1.7-.2'],
+    python:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.25 7.4h3.2a1 1 0 0 1 0 2h-1.7a1 1 0 0 0 0 2h3.8'],
+    rust:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.2 7.6h5.6M5.2 9.3h5.6M5.2 11h3.4'],
+    go:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5 9.2h5.8M8.9 7.6a2 2 0 1 0 0 3.2'],
+    json:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M6.2 7c-.8 0-1 .4-1 1v.4c0 .5-.2.7-.7.9.5.2.7.4.7.9v.4c0 .6.2 1 1 1M9.8 7c.8 0 1 .4 1 1v.4c0 .5.2.7.7.9-.5.2-.7.4-.7.9v.4c0 .6-.2 1-1 1'],
+    style:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.3 7.4h5.4M5.3 9.1h3.7M5.3 10.8h5.4'],
+    markup:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M6.2 7.5 5 9l1.2 1.5M9.8 7.5 11 9l-1.2 1.5'],
+    markdown:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.3 10.8V7.6l1.2 1.5 1.2-1.5v3.2M9.2 9.2h2M10.2 7.8v2.8'],
+    text:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.2 7.4h5.5M5.2 9.1h5.5M5.2 10.8h3.5'],
+    image:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5 11l2.2-2.5 1.4 1.3 1.2-1.2 1.4 2.4z','M6 7.3h.1'],
+    database:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.2 7.3c0 .8 4.8.8 4.8 0M5.2 7.3v3c0 .8 4.8.8 4.8 0v-3M5.2 8.8c0 .8 4.8.8 4.8 0'],
+    terminal:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.1 7.5l1.5 1.3-1.5 1.3M7.8 10.1h2.6'],
+    config:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5 7.3h5.5M5 9.2h5.5M5 11.1h5.5','M6.6 6.8v1M8.9 8.7v1M6.1 10.6v1'],
+    archive:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.3 7h5.3v4.4H5.3zM7.9 7v1.2M7.9 9.2v.8'],
+    audio:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M8.7 7v3.2a1 1 0 1 1-.8-1M8.7 7l2-.5v2.7'],
+    video:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M6 7.3v3.4l3-1.7z'],
+    spreadsheet:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5 7h6v4.5H5zM7 7v4.5M9 7v4.5M5 8.5h6M5 10h6'],
+    diff:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5.2 7.4h3M6.7 6v2.8M9.1 9.8h2.1'],
+    package:['M3.25 1.5h6.1l3.4 3.4v9.6h-9.5z','M9.25 1.75v3.3h3.25','M5 7.2 8 5.8l3 1.4-3 1.4zM5 7.2v3.5l3 1.4 3-1.4V7.2M8 8.6v3.5'],
+};
+function gitStatusForChange(change) {
+    if (GIT_STATUS_LABELS[change.status]) return change.status;
+    const code = `${change.index || ' '}${change.worktree || ' '}`;
+    if (code.includes('D')) return 'deleted';
+    if (code.includes('R')) return 'renamed';
+    if (code.includes('A')) return 'added';
+    if (code.includes('?')) return 'untracked';
+    return 'modified';
+}
+function gitChangeAreas(change) {
+    const status = gitStatusForChange(change);
+    const index = change.index || ' ';
+    const worktree = change.worktree || ' ';
+    const staged = status !== 'untracked' && index !== ' ' && index !== '?';
+    const unstaged = status === 'untracked' || worktree !== ' ' && worktree !== '?';
+    return {staged, unstaged:unstaged || !staged};
+}
+function buildGitDecorationMaps(changes = []) {
+    const files = new Map();
+    const folders = new Map();
+    const addStatus = (map, path, status) => {
+        const current = map.get(path);
+        if (!current || GIT_STATUS_PRIORITY[status] > GIT_STATUS_PRIORITY[current]) map.set(path, status);
+    };
+    for (const change of changes) {
+        if (!change.path) continue;
+        const status = gitStatusForChange(change);
+        addStatus(files, change.path, status);
+        if (status === 'deleted') continue;
+        const segments = change.path.split('/');
+        let parent = '';
+        for (const segment of segments.slice(0, -1)) {
+            parent = parent ? `${parent}/${segment}` : segment;
+            addStatus(folders, parent, status);
+        }
+    }
+    return {files, folders};
+}
+function fileIconCategoryForPath(path) {
+    const filename = (path || '').split(/[\\/]/).pop().toLocaleLowerCase();
+    if (!filename) return 'generic';
+    if (Object.hasOwn(FILE_ICON_BY_NAME, filename)) return FILE_ICON_BY_NAME[filename];
+    const dot = filename.lastIndexOf('.');
+    const extension = dot > 0 && dot < filename.length - 1 ? filename.slice(dot + 1) : '';
+    return Object.hasOwn(FILE_ICON_BY_EXTENSION, extension) ? FILE_ICON_BY_EXTENSION[extension] : 'generic';
+}
+function createExplorerIcon(category) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('class', `file-type-icon file-icon-${category}`);
+    svg.setAttribute('aria-hidden', 'true');
+    const iconPaths = Object.hasOwn(FILE_ICON_PATHS, category) ? FILE_ICON_PATHS[category] : FILE_ICON_PATHS.generic;
+    for (const shape of iconPaths) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', shape);
+        svg.append(path);
+    }
+    return svg;
+}
+
 async function loadDirectory(relative, force = false) {
     const workspace = selectedWorkspace();
     if (!workspace) {
@@ -1507,12 +1900,48 @@ async function loadDirectory(relative, force = false) {
     }
 }
 
+function refreshFiles() {
+    const workspace = selectedWorkspace();
+    if (!workspace) return renderFileTree();
+    const prefix = `${workspace.id}:`;
+    for (const key of state.directoryCache.keys()) {
+        if (key.startsWith(prefix)) state.directoryCache.delete(key);
+    }
+    state.nameSearchResponse = null;
+    if (state.explorerMode === 'names' && $('file-search').value.trim()) scheduleWorkspaceSearch('names');
+    else if (state.explorerMode === 'content' && $('content-search').value.trim()) scheduleWorkspaceSearch('content');
+    else renderFileTree();
+}
+
+function collapseFileTree() {
+    const workspace = selectedWorkspace();
+    if (!workspace) return;
+    const prefix = `${workspace.id}:`;
+    for (const key of state.expandedWorkspaces) {
+        if (key.startsWith(prefix)) state.expandedWorkspaces.delete(key);
+    }
+    renderFileTree();
+}
+
 function renderFileTree() {
     const workspace = selectedWorkspace();
-    $('explorer-root').textContent = workspace ? workspace.name : 'Selecciona un workspace';
-    $('explorer-root').title = workspace?.path || '';
-    if (!workspace) return;
-    const filter = $('file-search').value.trim().toLocaleLowerCase();
+    renderExplorerWorkspacePicker();
+    const dotfilesButton = $('toggle-dotfiles');
+    dotfilesButton?.setAttribute('aria-pressed', String(state.showDotfiles));
+    dotfilesButton?.setAttribute('aria-label', state.showDotfiles ? 'Ocultar archivos ocultos' : 'Mostrar archivos ocultos');
+    dotfilesButton?.setAttribute('title', state.showDotfiles ? 'Ocultar archivos ocultos' : 'Mostrar archivos ocultos');
+    if (!workspace) {
+        $('file-tree').replaceChildren(node('div', 'inspector-empty', 'Selecciona un workspace.'));
+        return;
+    }
+    const filter = $('file-search').value.trim();
+    if (filter) {
+        if (state.nameSearchWorkspaceId === workspace.id && state.nameSearchResponse) {
+            renderNameSearchResults(state.nameSearchResponse);
+        } else $('file-tree').replaceChildren(node('div', 'inspector-empty', 'Buscando nombres en el workspace…'));
+        return;
+    }
+    const decorations = buildGitDecorationMaps(workspace.git?.changes || []);
     const rootData = state.directoryCache.get(`${workspace.id}:`);
     if (!rootData) {
         $('file-tree').replaceChildren(node('div', 'inspector-empty', 'Cargando archivos…'));
@@ -1527,17 +1956,34 @@ function renderFileTree() {
             loadDirectory(relative);
             return list;
         }
-        let entries = data.entries || [];
-        if (!relative && filter) entries = entries.filter(item => item.name.toLocaleLowerCase().includes(filter));
+        let entries = [...(data.entries || [])].sort((left, right) => {
+            const typeOrder = Number(left.type !== 'directory') - Number(right.type !== 'directory');
+            return typeOrder || FILE_NAME_COLLATOR.compare(left.name, right.name);
+        });
+        if (!state.showDotfiles) entries = entries.filter(item => !item.name.startsWith('.'));
         for (const entry of entries) {
             const path = relative ? `${relative}/${entry.name}` : entry.name;
             const item = node('li', 'file-node');
             const button = node('button', `file-entry ${entry.type}`); button.type = 'button';
             const expanded = state.expandedWorkspaces.has(`${workspace.id}:${path}`);
-            const glyph = entry.type === 'directory' ? expanded ? '▾' : '›' : entry.type === 'symlink' ? '↗' : entry.type === 'file' ? '·' : '—';
-            button.append(node('span', 'file-glyph', glyph), node('span', 'file-name', entry.name));
-            if (entry.type === 'file' && entry.size != null) button.append(node('span', 'file-size', formatBytes(entry.size)));
-            button.title = entry.type === 'symlink' ? 'Los enlaces simbólicos se muestran, pero no se siguen.' : path;
+            const gitStatus = entry.type === 'directory'
+                ? decorations.folders.get(path) || decorations.files.get(path)
+                : decorations.files.get(path);
+            if (entry.type === 'directory') {
+                button.append(node('span', `file-chevron ${expanded ? 'open' : ''}`, '›'));
+            }
+            const iconCategory = entry.type === 'directory' ? expanded ? 'folder-open' : 'folder'
+                : entry.type === 'symlink' ? 'symlink'
+                    : entry.type === 'file' ? fileIconCategoryForPath(entry.name) : 'generic';
+            button.append(createExplorerIcon(iconCategory), node('span', 'file-name', entry.name));
+            if (gitStatus) {
+                const status = node('span', `file-git-status ${gitStatus}`, GIT_STATUS_LABELS[gitStatus] || 'M');
+                status.setAttribute('aria-label', `Estado Git: ${gitStatus}`);
+                button.append(status);
+                button.classList.add(`git-status-${gitStatus}`);
+            }
+            button.title = entry.type === 'symlink' ? 'Los enlaces simbólicos se muestran, pero no se siguen.'
+                : `${path}${entry.type === 'file' && entry.size != null ? ` · ${formatBytes(entry.size)}` : ''}${gitStatus ? ` · ${gitStatus}` : ''}`;
             if (entry.type === 'directory') {
                 button.setAttribute('aria-expanded', String(expanded));
                 button.addEventListener('click', () => {
@@ -1554,7 +2000,7 @@ function renderFileTree() {
             list.append(item);
         }
         if (!entries.length) {
-            const empty = node('li', 'file-node'); empty.append(node('span', 'inspector-empty', filter && !relative ? 'No hay coincidencias en esta carpeta.' : 'Carpeta vacía.')); list.append(empty);
+            const empty = node('li', 'file-node'); empty.append(node('span', 'inspector-empty', 'Carpeta vacía.')); list.append(empty);
         }
         if (data.truncated) {
             const more = node('li', 'file-node'); more.append(node('span', 'inspector-empty', 'Listado limitado a 500 entradas.')); list.append(more);
@@ -1562,6 +2008,159 @@ function renderFileTree() {
         return list;
     };
     $('file-tree').replaceChildren(buildList(''));
+}
+
+function renderExplorerWorkspacePicker() {
+    const select = $('explorer-workspace-picker');
+    if (!select) return;
+    const workspaces = state.workspaceData?.workspaces || [];
+    const selected = selectedWorkspace();
+    select.replaceChildren(new Option(workspaces.length ? 'Selecciona un workspace' : 'Sin workspaces', ''));
+    for (const workspace of workspaces) {
+        select.append(new Option(`${workspace.name}${workspace.git?.branch ? ` · ${workspace.git.branch}` : ''}`, workspace.id));
+    }
+    select.value = selected?.id || '';
+    select.disabled = workspaces.length < 2;
+    select.title = selected?.path || 'Selecciona un workspace';
+}
+
+function renderNameSearchResults(data) {
+    const host = $('file-tree');
+    const results = data?.results || [];
+    if (!results.length) {
+        host.replaceChildren(node('div', 'inspector-empty', data?.truncated
+            ? 'No hubo coincidencias en el tramo revisado; la búsqueda alcanzó un límite.'
+            : 'No se encontraron archivos con ese nombre.'));
+        return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const result of results) {
+        const button = node('button', 'name-search-result');
+        button.type = 'button';
+        const name = result.path.split('/').pop();
+        button.append(createExplorerIcon(fileIconCategoryForPath(name)),
+            node('span', 'file-name', result.path));
+        button.title = `Abrir ${result.path}`;
+        button.addEventListener('click', () => openFile(result.path));
+        fragment.append(button);
+    }
+    if (data.truncated) fragment.append(node('div', 'search-truncated', 'Resultados parciales · el workspace supera el límite de búsqueda.'));
+    host.replaceChildren(fragment);
+}
+
+function renderContentSearchResults(data) {
+    const host = $('search-results');
+    const results = data?.results || [];
+    $('search-results-meta').textContent = results.length
+        ? `${results.length} coincidencias${data.truncated ? ' · resultados parciales' : ''}`
+        : data?.truncated ? 'Búsqueda parcial; no se encontraron coincidencias dentro del límite.' : 'Sin coincidencias.';
+    if (!results.length) {
+        host.replaceChildren(node('div', 'inspector-empty', data?.truncated
+            ? 'Se alcanzó un límite de búsqueda. Ajusta los filtros para acotar.' : 'No se encontraron coincidencias.'));
+        return;
+    }
+    const groups = new Map();
+    for (const result of results) {
+        if (!groups.has(result.path)) groups.set(result.path, []);
+        groups.get(result.path).push(result);
+    }
+    const fragment = document.createDocumentFragment();
+    for (const [path, matches] of groups) {
+        const group = node('section', 'search-result-group');
+        const heading = node('button', 'search-result-path', path);
+        heading.type = 'button'; heading.title = `Abrir ${path}`;
+        heading.addEventListener('click', () => openFile(path));
+        group.append(heading);
+        for (const result of matches) {
+            const row = node('button', 'search-result-line');
+            row.type = 'button';
+            const excerpt = node('span', 'search-result-excerpt');
+            const matchStart = Math.max(0, Math.min(result.excerpt.length, result.excerpt_match_offset_utf16 ?? result.excerpt_match_offset ?? 0));
+            const matchEnd = Math.max(matchStart, Math.min(result.excerpt.length, matchStart + (result.match_length_utf16 ?? result.match_length ?? 0)));
+            excerpt.append(document.createTextNode(result.excerpt.slice(0, matchStart)));
+            if (matchEnd > matchStart) excerpt.append(node('mark', 'search-match', result.excerpt.slice(matchStart, matchEnd)));
+            excerpt.append(document.createTextNode(result.excerpt.slice(matchEnd)));
+            row.append(node('span', 'search-result-line-number', String(result.line)), excerpt);
+            row.title = `${path}:${result.line}:${result.column}`;
+            row.addEventListener('click', () => openFileAtSearchResult(result));
+            group.append(row);
+        }
+        fragment.append(group);
+    }
+    if (data.truncated) fragment.append(node('div', 'search-truncated', 'Resultados parciales · acota la búsqueda para ver más.'));
+    host.replaceChildren(fragment);
+}
+
+function scheduleWorkspaceSearch(mode = state.explorerMode) {
+    clearTimeout(workspaceSearchTimer);
+    const query = $(mode === 'names' ? 'file-search' : 'content-search').value.trim();
+    const workspace = selectedWorkspace();
+    state.searchGeneration++;
+    if (mode === 'names') {
+        state.nameSearchWorkspaceId = workspace?.id || null;
+        state.nameSearchResponse = null;
+        if (!query) { renderFileTree(); return; }
+        $('file-tree').replaceChildren(node('div', 'inspector-empty', 'Buscando nombres en el workspace…'));
+    } else {
+        $('search-results-meta').textContent = '';
+        if (!query) {
+            $('search-results').replaceChildren(node('div', 'inspector-empty', 'Escribe para buscar en el workspace.'));
+            return;
+        }
+        $('search-results').replaceChildren(node('div', 'inspector-empty', 'Buscando contenido…'));
+    }
+    if (!workspace) {
+        if (mode === 'names') $('file-tree').replaceChildren(node('div', 'inspector-empty', 'Selecciona un workspace.'));
+        else $('search-results').replaceChildren(node('div', 'inspector-empty', 'Selecciona un workspace.'));
+        return;
+    }
+    workspaceSearchTimer = setTimeout(() => runWorkspaceSearch(mode), 220);
+}
+
+async function runWorkspaceSearch(mode = state.explorerMode) {
+    const workspace = selectedWorkspace();
+    const query = $(mode === 'names' ? 'file-search' : 'content-search').value.trim();
+    if (!workspace || !query) return;
+    const generation = ++state.searchGeneration;
+    const workspaceId = workspace.id;
+    const payload = {
+        query, mode,
+        include: mode === 'content' ? $('search-include').value : '',
+        exclude: mode === 'content' ? $('search-exclude').value : '',
+        case_sensitive: mode === 'content' && $('search-case-sensitive').checked,
+        whole_word: mode === 'content' && $('search-whole-word').checked,
+        regex: mode === 'content' && $('search-regex').checked,
+        show_dotfiles: state.showDotfiles,
+        limit: 200,
+    };
+    try {
+        const data = await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/search`, jsonOptions('POST', payload));
+        if (generation !== state.searchGeneration || selectedWorkspace()?.id !== workspaceId) return;
+        if (mode === 'names') {
+            state.nameSearchWorkspaceId = workspaceId;
+            state.nameSearchResponse = data;
+            renderNameSearchResults(data);
+        } else renderContentSearchResults(data);
+    } catch (error) {
+        if (generation !== state.searchGeneration || selectedWorkspace()?.id !== workspaceId) return;
+        const host = mode === 'names' ? $('file-tree') : $('search-results');
+        host.replaceChildren(node('div', 'inspector-empty', error.message));
+        if (mode === 'content') $('search-results-meta').textContent = 'No se pudo completar la búsqueda.';
+    }
+}
+
+async function openFileAtSearchResult(result) {
+    const tab = await openFile(result.path);
+    if (!tab || activeTab()?.id !== tab.id || !currentEditorView || currentEditorTabId !== tab.id) return;
+    let lineStart = 0;
+    for (let line = 1; line < result.line; line++) {
+        const newline = tab.content.indexOf('\n', lineStart);
+        if (newline < 0) break;
+        lineStart = newline + 1;
+    }
+    const position = Math.min(tab.content.length, lineStart + Math.max(0, (result.column_utf16 || result.column) - 1));
+    currentEditorView.dispatch({selection:{anchor:position}, scrollIntoView:true});
+    currentEditorView.focus();
 }
 
 function formatBytes(size) {
@@ -1575,7 +2174,7 @@ async function openFile(relative) {
     const project = selectedProject();
     if (!workspace || !project) return;
     const existing = state.tabs.find(item => item.type === 'file' && item.workspaceId === workspace.id && item.path === relative);
-    if (existing) { activateTab(existing.id); return; }
+    if (existing) { activateTab(existing.id); return existing; }
     if (activeTab()?.type === 'file') {
         clearTimeout(navigationTimer);
         recordNavigation(activeTab());
@@ -1594,8 +2193,10 @@ async function openFile(relative) {
         if (mobileViewport()) setMobileSurface('files', {filesBrowser:false});
         renderCenter();
         if (window.matchMedia('(max-width:1050px)').matches) closeMobileDrawers(true);
+        return tab;
     } catch (error) {
         if (generation === state.fileGeneration) toast(error.message);
+        return null;
     }
 }
 
@@ -1984,6 +2585,10 @@ function openGitDiff(change, kind) {
 function renderGit() {
     const workspace = selectedWorkspace();
     const git = workspace?.git;
+    if (state.gitStatsWorkspaceId !== (workspace?.id || null)) {
+        state.gitStats = {};
+        state.gitStatsWorkspaceId = workspace?.id || null;
+    }
     $('github-mark').hidden = !git?.github_available;
     $('git-branch').textContent = !workspace ? 'Sin workspace' : git?.is_git ? `${git.branch || 'detached'}${git.detached ? ' · HEAD separado' : ''}` : git?.available === false ? 'Git no disponible' : 'Sin repositorio Git';
     $('git-branch').title = git?.root || '';
@@ -1992,41 +2597,271 @@ function renderGit() {
     remotePicker.hidden = remotes.length === 0;
     remotePicker.replaceChildren(...remotes.map(remote => new Option(`${remote.name}${remote.provider === 'github' ? ' · GitHub' : ''}`, remote.name)));
     $('fetch-branches').hidden = remotes.length === 0;
+    const canCreatePr = Boolean(git?.is_git && !git.detached && git.branch && git.default_branch
+        && git.branch !== git.default_branch
+        && remotes.some(remote => remote.name === 'origin' && remote.provider === 'github')
+        && state.githubStatus?.authenticated);
+    $('create-pr').hidden = !canCreatePr;
     const host = $('git-changes');
-    if (!workspace) { host.replaceChildren(node('div', 'inspector-empty', 'Selecciona un workspace para ver sus cambios.')); return; }
-    if (!git?.is_git) { host.replaceChildren(node('div', 'inspector-empty', git?.error || 'Este workspace no tiene Git.')); return; }
-    const changes = git.changes || [];
-    if (!changes.length) { host.replaceChildren(node('div', 'inspector-empty', 'Working tree limpio.')); return; }
-    const fragment = document.createDocumentFragment();
-    for (const change of changes.slice(0, 80)) {
-        const staged = change.status !== 'untracked' && change.index && change.index !== ' ' && change.index !== '?';
-        const worktree = change.status === 'untracked' || (change.worktree && change.worktree !== ' ' && change.worktree !== '?');
-        const addEntry = (kind, label, code) => {
-            const button = node('button', `git-entry git-entry-${kind}`); button.type = 'button';
-            button.append(node('span', `git-code ${change.status}`, code),
-                node('span', 'git-path', change.path), node('span', 'git-kind', label));
-            button.title = `${kind === 'staged' ? 'HEAD → índice' : 'Índice → disco'} · ${change.status} · ${change.path}`;
-            button.addEventListener('click', () => openGitDiff(change, kind));
-            fragment.append(button);
-        };
-        const code = change.status === 'untracked' ? 'U' : change.status === 'renamed' ? 'R'
-            : change.status === 'deleted' ? 'D' : `${change.index}${change.worktree}`.trim() || 'M';
-        if (staged) addEntry('staged', 'Preparado', code);
-        if (worktree) addEntry('worktree', change.status === 'untracked' ? 'Nuevo' : 'Disco', code);
-        if (!staged && !worktree) addEntry('worktree', 'Disco', code);
+    const count = $('git-change-count');
+    const allChanges = git?.changes || [];
+    count.hidden = !workspace || !git?.is_git || !allChanges.length;
+    count.textContent = `${allChanges.length}${git?.changes_truncated ? '+' : ''}`;
+    count.title = git?.changes_truncated ? 'La lista está limitada a los primeros 500 cambios.'
+        : `${allChanges.length} ${allChanges.length === 1 ? 'archivo modificado' : 'archivos modificados'}`;
+    syncGitCommitDraft(workspace?.id || null);
+    const stagedChanges = allChanges.filter(change => gitChangeAreas(change).staged);
+    const unstagedChanges = allChanges.filter(change => gitChangeAreas(change).unstaged);
+    $('stage-all').disabled = !workspace || !git?.is_git || !unstagedChanges.length;
+    $('commit-changes').disabled = !workspace || !git?.is_git || !stagedChanges.length || !$('commit-message').value.trim();
+    if (!workspace) { host.replaceChildren(node('div', 'inspector-empty', 'Selecciona un workspace para ver sus cambios.')); renderGitHistory(); return; }
+    if (!git?.is_git) { host.replaceChildren(node('div', 'inspector-empty', git?.error || 'Este workspace no tiene Git.')); renderGitHistory(); return; }
+    if (!allChanges.length) { host.replaceChildren(node('div', 'inspector-empty', 'Working tree limpio.')); renderGitHistory(); return; }
+    const filter = $('git-search').value.trim().toLocaleLowerCase();
+    const changes = filter ? allChanges.filter(change =>
+        change.path.toLocaleLowerCase().includes(filter)
+        || gitStatusForChange(change).includes(filter)
+    ) : allChanges;
+    if (!changes.length) { host.replaceChildren(node('div', 'inspector-empty', 'No hay cambios que coincidan.')); renderGitHistory(); return; }
+    const sections = [
+        {id:'unstaged', label:'Changes', kind:'worktree', changes:[]},
+        {id:'untracked', label:'Untracked Files', kind:'worktree', changes:[]},
+        {id:'staged', label:'Staged Changes', kind:'staged', changes:[]},
+    ];
+    for (const change of changes) {
+        const areas = gitChangeAreas(change);
+        if (areas.unstaged) sections[change.status === 'untracked' ? 1 : 0].changes.push(change);
+        if (areas.staged) sections[2].changes.push(change);
     }
+    const fragment = document.createDocumentFragment();
+    for (const section of sections) {
+        if (!section.changes.length) continue;
+        const group = node('section', `git-change-group git-change-group-${section.id}`);
+        const collapsed = state.gitCollapsedSections.has(section.id);
+        const heading = node('div', 'git-group-heading-row');
+        const toggle = node('button', 'git-group-heading'); toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', String(!collapsed));
+        toggle.append(node('span', `git-group-chevron ${collapsed ? '' : 'open'}`, '›'),
+            node('span', 'git-group-label', section.label),
+            node('span', 'git-group-count', String(section.changes.length)));
+        toggle.addEventListener('click', () => {
+            if (state.gitCollapsedSections.has(section.id)) state.gitCollapsedSections.delete(section.id);
+            else state.gitCollapsedSections.add(section.id);
+            renderGit();
+        });
+        heading.append(toggle);
+        if (section.id === 'unstaged' || section.id === 'untracked') {
+            const stage = node('button', 'git-group-action', section.id === 'untracked' ? '＋' : 'Stage All');
+            stage.type = 'button'; stage.title = `Stage ${section.label}`;
+            stage.setAttribute('aria-label', `Preparar ${section.label}`);
+            stage.addEventListener('click', () => performGitAction('stage', section.changes.map(change => change.path)));
+            heading.append(stage);
+        }
+        group.append(heading);
+        if (!collapsed) {
+            for (const change of section.changes) {
+                const status = gitStatusForChange(change);
+                const code = GIT_STATUS_LABELS[status] || `${change.index}${change.worktree}`.trim() || 'M';
+                const row = node('div', `git-entry-row git-entry-${section.kind} git-status-${status}`);
+                const open = node('button', 'git-entry'); open.type = 'button';
+                const segments = change.path.split('/');
+                const filename = segments.pop();
+                const filePath = node('span', 'git-path');
+                filePath.append(node('strong', 'git-file-name', filename));
+                if (segments.length) filePath.append(node('small', 'git-file-parent', segments.join('/')));
+                const stats = state.gitStats[change.path]?.[section.kind];
+                const statLabel = stats && (stats.additions !== null || stats.deletions !== null)
+                    ? `+${stats.additions ?? '–'} −${stats.deletions ?? '–'}` : '';
+                open.append(node('span', `git-code ${status}`, code), filePath,
+                    node('span', 'git-line-stats', statLabel));
+                open.title = `${section.kind === 'staged' ? 'HEAD → índice' : 'Índice → disco'} · ${status} · ${change.path}`;
+                open.addEventListener('click', () => openGitDiff(change, section.kind));
+                const actions = node('span', 'git-entry-actions');
+                if (section.kind === 'staged') {
+                    const unstage = node('button', 'git-row-action', '−'); unstage.type = 'button';
+                    unstage.title = `Quitar ${change.path} de Stage`; unstage.setAttribute('aria-label', `Quitar de preparados: ${change.path}`);
+                    unstage.addEventListener('click', () => performGitAction('unstage', [change.path]));
+                    actions.append(unstage);
+                } else {
+                    const stage = node('button', 'git-row-action', '+'); stage.type = 'button';
+                    stage.title = `Stage ${change.path}`; stage.setAttribute('aria-label', `Preparar: ${change.path}`);
+                    stage.addEventListener('click', () => performGitAction('stage', [change.path]));
+                    const discard = node('button', 'git-row-action destructive', '×'); discard.type = 'button';
+                    discard.title = `Descartar cambios de ${change.path}`; discard.setAttribute('aria-label', `Descartar cambios de ${change.path}`);
+                    discard.addEventListener('click', () => {
+                        if (confirm(`¿Descartar los cambios sin preparar de ${change.path}? Esta acción no se puede deshacer.`)) {
+                            performGitAction('discard', [change.path]);
+                        }
+                    });
+                    actions.append(stage, discard);
+                }
+                row.append(open, actions);
+                group.append(row);
+            }
+        }
+        fragment.append(group);
+    }
+    if (git?.changes_truncated) fragment.append(node('div', 'search-truncated',
+        'Se muestran los primeros 500 cambios. Actualiza o usa Git desde la terminal para revisar el resto.'));
     host.replaceChildren(fragment);
+    renderGitHistory();
 }
 
 async function refreshGit() {
     const workspace = selectedWorkspace();
     if (!workspace) return;
     try {
-        const data = await api(`/api/workspaces/${encodeURIComponent(workspace.id)}/git`);
+        const workspaceId = workspace.id;
+        const data = await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/git`, {cache:false});
+        if (selectedWorkspace()?.id !== workspace.id) return;
+        if (state.gitStatsWorkspaceId !== workspaceId) {
+            state.gitStats = {};
+            state.gitStatsWorkspaceId = workspaceId;
+        }
+        workspace.git = data.git;
+        renderBranchPicker(); renderGit(); renderFileTree(); renderTree();
+        refreshGitStats(workspaceId);
+        if (!$('git-history-list').hidden && state.gitHistoryWorkspaceId !== workspaceId) loadGitHistory(workspaceId);
+        if (data.git?.github_available && state.githubStatus === null) {
+            state.githubStatus = {loading:true};
+            api('/api/github/status', {cache:false}).then(status => {
+                state.githubStatus = status;
+                renderGit();
+            }).catch(() => { state.githubStatus = {authenticated:false}; renderGit(); });
+        }
+    } catch (error) { toast(error.message); }
+}
+
+async function refreshGitStats(workspaceId = selectedWorkspace()?.id) {
+    if (!workspaceId) return;
+    try {
+        const data = await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/git/stats`, {cache:false});
+        if (selectedWorkspace()?.id !== workspaceId) return;
+        state.gitStats = data.stats || {};
+        state.gitStatsWorkspaceId = workspaceId;
+        renderGit();
+    } catch (_) {
+        if (selectedWorkspace()?.id === workspaceId) { state.gitStats = {}; state.gitStatsWorkspaceId = workspaceId; }
+    }
+}
+
+function syncGitCommitDraft(workspaceId) {
+    const input = $('commit-message');
+    if (state.gitCommitDraftWorkspaceId === workspaceId) return;
+    if (state.gitCommitDraftWorkspaceId) state.gitCommitDrafts.set(state.gitCommitDraftWorkspaceId, input.value);
+    state.gitCommitDraftWorkspaceId = workspaceId;
+    input.value = workspaceId ? state.gitCommitDrafts.get(workspaceId) || '' : '';
+}
+
+async function performGitAction(action, paths = []) {
+    const workspace = selectedWorkspace();
+    if (!workspace) return;
+    const payload = action === 'commit'
+        ? {action, message:$('commit-message').value}
+        : {action, paths};
+    const button = action === 'commit' ? $('commit-changes') : $('stage-all');
+    if (button) button.disabled = true;
+    try {
+        const data = await api(`/api/workspaces/${encodeURIComponent(workspace.id)}/git/actions`, jsonOptions('POST', payload));
         if (selectedWorkspace()?.id !== workspace.id) return;
         workspace.git = data.git;
-        renderBranchPicker(); renderGit(); renderTree();
+        if (action === 'commit') {
+            state.gitCommitDrafts.delete(workspace.id);
+            $('commit-message').value = '';
+            toast('Commit creado.');
+        }
+        renderGit(); renderFileTree(); renderTree();
+        refreshGitStats(workspace.id);
+        if (!$('git-history-list').hidden) loadGitHistory(workspace.id);
     } catch (error) { toast(error.message); }
+    finally { if (button) button.disabled = false; renderGit(); }
+}
+
+function renderGitHistory() {
+    const host = $('git-history-list');
+    if (!host) return;
+    const workspace = selectedWorkspace();
+    if (host.hidden) return;
+    if (state.gitHistoryWorkspaceId && state.gitHistoryWorkspaceId !== workspace?.id) {
+        state.gitHistoryWorkspaceId = null;
+        state.gitHistory = [];
+        $('git-history-count').textContent = '';
+    }
+    if (!workspace?.git?.is_git) {
+        host.replaceChildren(node('div', 'inspector-empty', 'El historial requiere un repositorio Git.'));
+        return;
+    }
+    if (state.gitHistoryWorkspaceId !== workspace.id) {
+        host.replaceChildren(node('div', 'inspector-empty', 'Cargando commits…'));
+        return;
+    }
+    if (!state.gitHistory.length) {
+        host.replaceChildren(node('div', 'inspector-empty', 'Este repositorio todavía no tiene commits.'));
+        return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const commit of state.gitHistory) {
+        const row = node('article', 'git-commit-row');
+        row.append(node('strong', 'git-commit-subject', commit.subject || '(sin mensaje)'),
+            node('span', 'git-commit-meta', `${commit.short_hash} · ${commit.author} · ${new Date(commit.timestamp * 1000).toLocaleDateString()}`));
+        row.title = `${commit.hash}\n${commit.subject}`;
+        fragment.append(row);
+    }
+    host.replaceChildren(fragment);
+}
+
+async function loadGitHistory(workspaceId = selectedWorkspace()?.id) {
+    if (!workspaceId) return;
+    state.gitHistoryWorkspaceId = null;
+    state.gitHistory = [];
+    renderGitHistory();
+    try {
+        const data = await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/git/history`, {cache:false});
+        if (selectedWorkspace()?.id !== workspaceId || $('git-history-list').hidden) return;
+        state.gitHistoryWorkspaceId = workspaceId;
+        state.gitHistory = data.commits || [];
+        $('git-history-count').textContent = state.gitHistory.length ? String(state.gitHistory.length) : '';
+        renderGitHistory();
+    } catch (error) {
+        if (selectedWorkspace()?.id === workspaceId) {
+            state.gitHistoryWorkspaceId = workspaceId;
+            $('git-history-list').replaceChildren(node('div', 'inspector-empty', error.message));
+        }
+    }
+}
+
+function openCreatePrDialog() {
+    const git = selectedWorkspace()?.git;
+    if (!git?.default_branch || !git.branch) return;
+    $('pr-title').value = `Update ${git.branch}`;
+    $('pr-base').value = git.default_branch;
+    $('pr-body').value = '';
+    $('pr-error').hidden = true;
+    $('pr-error').replaceChildren();
+    $('create-pr-dialog').showModal();
+}
+
+async function createPullRequest(event) {
+    event.preventDefault();
+    const workspace = selectedWorkspace();
+    if (!workspace) return;
+    const submit = $('pr-submit');
+    const result = $('pr-error');
+    submit.disabled = true;
+    result.hidden = true;
+    try {
+        const data = await api(`/api/workspaces/${encodeURIComponent(workspace.id)}/pull-request`, jsonOptions('POST', {
+            title:$('pr-title').value.trim(), base:$('pr-base').value.trim(), body:$('pr-body').value,
+        }));
+        result.className = 'pr-success';
+        result.hidden = false;
+        result.replaceChildren(node('span', '', 'Pull Request creado: '));
+        const link = node('a', '', data.url); link.href = data.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+        result.append(link);
+        refreshGit();
+    } catch (error) {
+        result.className = 'dialog-error'; result.textContent = error.message; result.hidden = false;
+    } finally { submit.disabled = false; }
 }
 
 async function refreshMessagesAndGit() {
@@ -2047,6 +2882,83 @@ function renderRecipientPicker() {
     select.replaceChildren(...sessions.map(item => new Option(`${item.title || agentName(item)} · ${item.id}`, item.id)));
     if (state.selectedSessionId && sessions.some(item => item.id === state.selectedSessionId)) select.value = state.selectedSessionId;
     $('message-form').hidden = !project || sessions.length === 0;
+}
+
+function renderAgentHistory() {
+    const host = $('history-list');
+    if (!host) return;
+    const workspace = selectedWorkspace();
+    const project = selectedProject();
+    const scope = state.historyScope;
+    if (scope === 'workspace' && !workspace || scope === 'project' && !project) {
+        host.replaceChildren(node('div', 'inspector-empty', 'Selecciona un workspace o proyecto para ver sus sesiones.'));
+        return;
+    }
+    const query = $('history-search')?.value.trim().toLocaleLowerCase() || '';
+    const sessions = state.sessions.filter(session => {
+        if (isWorkspaceShell(session)) return false;
+        if (scope === 'workspace' && session.workspace_id !== workspace?.id) return false;
+        if (scope === 'project' && session.project_id !== project?.id) return false;
+        if (!query) return true;
+        const searchable = [session.title, session.id, session.launcher, session.agent?.name,
+            session.agent?.key, session.preview, session.state, session.workspace_id]
+            .filter(Boolean).join(' ').toLocaleLowerCase();
+        return searchable.includes(query);
+    }).sort((left, right) => Date.parse(right.last_active || right.created_at || 0)
+        - Date.parse(left.last_active || left.created_at || 0));
+    if (!sessions.length) {
+        host.replaceChildren(node('div', 'inspector-empty', query ? 'No hay sesiones que coincidan.' : 'No hay sesiones registradas en este ámbito.'));
+        return;
+    }
+    const fragment = document.createDocumentFragment();
+    let activeDay = '';
+    for (const session of sessions) {
+        const dayLabel = sessionDayGroupLabel(session.last_active || session.created_at);
+        if (dayLabel !== activeDay) {
+            activeDay = dayLabel;
+            fragment.append(node('div', 'history-day-heading', dayLabel));
+        }
+        const row = node('button', `history-session ${sessionEnded(session) ? 'ended' : ''}`);
+        row.type = 'button';
+        const icon = node('span', 'history-agent-icon', (agentName(session).slice(0, 1) || 'A').toUpperCase());
+        const content = node('span', 'history-session-content');
+        const top = node('span', 'history-session-top');
+        top.append(node('strong', '', session.title || agentName(session)),
+            node('time', '', formatRelativeSessionTime(session.last_active || session.created_at)));
+        const meta = node('span', 'history-session-meta');
+        const projectName = state.projects.find(item => item.id === session.project_id)?.name;
+        const workspaceName = projectWorkspace(session.project_id, session.workspace_id)?.name;
+        meta.textContent = [agentName(session), projectName, workspaceName, stateLabel(session)].filter(Boolean).join(' · ');
+        content.append(top, meta);
+        if (session.preview) content.append(node('span', 'history-session-preview', session.preview));
+        row.append(icon, content);
+        row.title = `${session.title || agentName(session)} · ${stateLabel(session)} · Abrir sesión de WebConsole`;
+        row.addEventListener('click', () => openTerminal(session));
+        fragment.append(row);
+    }
+    host.replaceChildren(fragment);
+}
+
+function formatRelativeSessionTime(value) {
+    const timestamp = Date.parse(value || '');
+    if (!Number.isFinite(timestamp)) return '';
+    const elapsed = Math.max(0, Date.now() - timestamp);
+    if (elapsed < 60 * 60 * 1000) return `${Math.max(1, Math.floor(elapsed / 60000))}m`;
+    if (elapsed < 24 * 60 * 60 * 1000) return `${Math.floor(elapsed / 3600000)}h`;
+    if (elapsed < 7 * 24 * 60 * 60 * 1000) return `${Math.floor(elapsed / 86400000)}d`;
+    return new Date(timestamp).toLocaleDateString(undefined, {month:'short', day:'numeric'});
+}
+
+function sessionDayGroupLabel(value) {
+    const timestamp = Date.parse(value || '');
+    if (!Number.isFinite(timestamp)) return 'Older';
+    const date = new Date(timestamp);
+    const midnight = item => new Date(item.getFullYear(), item.getMonth(), item.getDate()).getTime();
+    const days = Math.floor((midnight(new Date()) - midnight(date)) / 86400000);
+    if (days <= 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    if (days < 7) return 'Earlier this week';
+    return date.toLocaleDateString(undefined, {year:'numeric', month:'long'});
 }
 
 function renderMessages() {
@@ -2093,7 +3005,7 @@ async function sendMessage(event) {
 }
 
 const PREF_ACCENT_PRESETS = ['#8acfb3', '#e18b83', '#9dbde0', '#d8b873', '#c792ea', '#89ddff', '#e6edf3', '#3fb950'];
-const PREF_TERMINAL_PRESETS = ['#1a1a2e', '#0d1117', '#161b22', '#101113', '#141b2d', '#211c28', '#1c1e26', '#0b0f14'];
+const PREF_TERMINAL_PRESETS = ['#0b0b0d', '#1a1a2e', '#0d1117', '#161b22', '#101113', '#141b2d', '#211c28', '#1c1e26', '#0b0f14'];
 
 function hexToRgb(hex) {
     const clean = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex.slice(1) : '000000';
@@ -2222,6 +3134,7 @@ async function savePreferences(event) {
 function wirePreferencesEvents() {
     $('open-preferences').addEventListener('click', openPreferencesDialog);
     $('preferences-form').addEventListener('submit', savePreferences);
+    $('pref-browser-notifications').addEventListener('change', handleBrowserNotificationPreferenceChange);
     document.querySelectorAll('#preferences-dialog [data-color][data-channel]').forEach(input => {
         const handler = () => setPreferenceChannel(input.dataset.color, input.dataset.channel, input.value);
         input.addEventListener('input', handler);
@@ -2954,6 +3867,8 @@ function handleTerminalMessage(event) {
             if (!data.success && data.error) toast(data.error);
             else if (data.success) toast('Referencia insertada en el input; no se envió.');
             renderAttachmentTray();
+        } else if (data.type === 'webconsole:attachment-error' && typeof data.error === 'string') {
+            toast(data.error);
         }
         return;
     }
@@ -2965,6 +3880,8 @@ function handleTerminalMessage(event) {
         document.body.classList.toggle('mobile-keyboard-open', Boolean(data.open));
     } else if (data.type === 'webconsole:interrupt-result') {
         toast(data.success ? 'Ctrl+C enviado a la terminal del workspace.' : 'La terminal no está conectada; no se envió Ctrl+C.');
+    } else if (data.type === 'webconsole:attachment-error' && typeof data.error === 'string') {
+        toast(data.error);
     }
 }
 
@@ -2983,7 +3900,152 @@ async function fetchBranches() {
     finally { button.disabled = false; }
 }
 
+function setupSidebarResizing() {
+    const workbench = $('workbench');
+    const projectHandle = $('project-sidebar-resize');
+    const inspectorHandle = $('inspector-sidebar-resize');
+    if (!workbench || !projectHandle || !inspectorHandle) return;
+
+    const defaults = {project:244, inspector:300};
+    const keys = {project:'webconsole.projectSidebarWidth', inspector:'webconsole.inspectorWidth'};
+    const loadWidth = side => {
+        try {
+            const saved = Number(localStorage.getItem(keys[side]));
+            return Number.isFinite(saved) && saved > 0 ? saved : defaults[side];
+        } catch (_) { return defaults[side]; }
+    };
+    let projectWidth = loadWidth('project');
+    let inspectorWidth = loadWidth('inspector');
+    const desktopLayout = () => window.innerWidth > 1050;
+    const projectGridLayout = () => window.innerWidth > 650;
+
+    function widthRange(side) {
+        const available = workbench.clientWidth || window.innerWidth;
+        if (side === 'project') {
+            const reserved = desktopLayout() ? 360 + 16 + inspectorWidth : 300 + 8;
+            return {min:180, max:Math.max(180, Math.min(420, available - reserved))};
+        }
+        return {min:220, max:Math.max(220, Math.min(480, available - 360 - 16 - projectWidth))};
+    }
+
+    function clampWidth(side, value) {
+        const range = widthRange(side);
+        return Math.max(range.min, Math.min(range.max, Math.round(value)));
+    }
+
+    function syncAria(handle, side, width) {
+        const range = widthRange(side);
+        handle.setAttribute('aria-valuemin', String(range.min));
+        handle.setAttribute('aria-valuemax', String(range.max));
+        handle.setAttribute('aria-valuenow', String(Math.round(width)));
+        handle.setAttribute('aria-valuetext', `${Math.round(width)} píxeles`);
+    }
+
+    function applyWidths() {
+        if (projectGridLayout()) projectWidth = clampWidth('project', projectWidth);
+        if (desktopLayout()) {
+            inspectorWidth = clampWidth('inspector', inspectorWidth);
+            projectWidth = clampWidth('project', projectWidth);
+        }
+        workbench.style.setProperty('--project-sidebar-width', `${projectWidth}px`);
+        workbench.style.setProperty('--inspector-width', `${inspectorWidth}px`);
+        syncAria(projectHandle, 'project', projectWidth);
+        syncAria(inspectorHandle, 'inspector', inspectorWidth);
+    }
+
+    function setWidth(side, value) {
+        if (side === 'project') projectWidth = clampWidth(side, value);
+        else inspectorWidth = clampWidth(side, value);
+        applyWidths();
+    }
+
+    function persistWidths() {
+        try {
+            localStorage.setItem(keys.project, String(Math.round(projectWidth)));
+            localStorage.setItem(keys.inspector, String(Math.round(inspectorWidth)));
+        } catch (_) {}
+    }
+
+    function bindHandle(handle, side) {
+        handle.addEventListener('keydown', event => {
+            if (side === 'inspector' && !desktopLayout()) return;
+            if (side === 'project' && !projectGridLayout()) return;
+            let value = side === 'project' ? projectWidth : inspectorWidth;
+            const range = widthRange(side);
+            if (event.key === 'Home') value = range.min;
+            else if (event.key === 'End') value = range.max;
+            else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                const grows = side === 'project' ? event.key === 'ArrowRight' : event.key === 'ArrowLeft';
+                value += grows ? 20 : -20;
+            } else return;
+            event.preventDefault();
+            setWidth(side, value);
+            persistWidths();
+        });
+
+        handle.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || (side === 'inspector' && !desktopLayout())
+                || (side === 'project' && !projectGridLayout())) return;
+            event.preventDefault();
+            const pointerId = event.pointerId;
+            const startX = event.clientX;
+            const startWidth = side === 'project' ? projectWidth : inspectorWidth;
+            try { handle.setPointerCapture(pointerId); } catch (_) {}
+            document.body.classList.add('sidebar-resizing');
+            let finished = false;
+            const move = moveEvent => {
+                if (moveEvent.pointerId !== pointerId) return;
+                const delta = moveEvent.clientX - startX;
+                setWidth(side, startWidth + (side === 'project' ? delta : -delta));
+            };
+            const end = () => {
+                if (finished) return;
+                finished = true;
+                handle.removeEventListener('pointermove', move);
+                handle.removeEventListener('pointerup', end);
+                handle.removeEventListener('pointercancel', end);
+                handle.removeEventListener('lostpointercapture', end);
+                document.body.classList.remove('sidebar-resizing');
+                persistWidths();
+                try {
+                    if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+                } catch (_) {}
+            };
+            handle.addEventListener('pointermove', move);
+            handle.addEventListener('pointerup', end);
+            handle.addEventListener('pointercancel', end);
+            handle.addEventListener('lostpointercapture', end);
+        });
+    }
+
+    bindHandle(projectHandle, 'project');
+    bindHandle(inspectorHandle, 'inspector');
+    applyWidths();
+    window.addEventListener('resize', applyWidths);
+}
+
 function attachEvents() {
+    try {
+        const savedTab = localStorage.getItem('webconsole.inspectorTab');
+        if (INSPECTOR_TABS.some(item => item.id === savedTab)) state.inspectorTab = savedTab;
+        state.showDotfiles = localStorage.getItem('webconsole.showDotfiles') !== 'false';
+        state.sidebarVisibility.projects = localStorage.getItem('webconsole.projectSidebarHidden') !== 'true';
+        state.sidebarVisibility.inspector = localStorage.getItem('webconsole.inspectorSidebarHidden') !== 'true';
+    } catch (_) {}
+    loadAgentNotificationPreferences();
+    setSidebarVisibility('projects', state.sidebarVisibility.projects, {persist:false});
+    setSidebarVisibility('inspector', state.sidebarVisibility.inspector, {persist:false});
+    setInspectorTab(state.inspectorTab, {persist:false});
+    $('inspector-tabs').addEventListener('click', event => {
+        const button = event.target.closest('[data-inspector-tab]');
+        if (button) setInspectorTab(button.dataset.inspectorTab);
+    });
+    $('inspector-tabs').addEventListener('keydown', handleInspectorTabKeydown);
+    $('collapse-project-sidebar').addEventListener('click', () => toggleSidebarVisibility('projects'));
+    $('restore-project-sidebar').addEventListener('click', () => toggleSidebarVisibility('projects'));
+    $('collapse-inspector-sidebar').addEventListener('click', () => toggleSidebarVisibility('inspector'));
+    $('restore-inspector-sidebar').addEventListener('click', () => toggleSidebarVisibility('inspector'));
+    setupSidebarResizing();
     navigationHistory = window.WebConsoleEditor?.NavigationHistory
         ? new window.WebConsoleEditor.NavigationHistory(250, updateHistoryButtons) : null;
     $('history-back').addEventListener('click', () => navigateHistory(-1));
@@ -3007,21 +4069,22 @@ function attachEvents() {
         const tab = activeTab();
         if (tab?.type === 'diff') openFile(tab.path);
     });
-    $('add-project').addEventListener('click', openProjectDialog);
     $('sidebar-add-project')?.addEventListener('click', openProjectDialog);
     $('welcome-action').addEventListener('click', () => {
         if (!selectedProject()) openProjectDialog();
         else if (!selectedWorkspace()) refreshAll();
         else openAgentDialog();
     });
-    $('add-agent').addEventListener('click', openAgentDialog);
     $('interrupt-agent')?.addEventListener('click', () => {
         const session = currentAgentSession();
         if (session) dispatchAgentAction(session, {id:'interrupt'});
     });
     if (hasWorkspaceTerminalUI()) {
         $('terminal-drawer-toggle').addEventListener('click', () => setTerminalExpanded(!state.terminalExpanded));
-        $('mobile-shell-open')?.addEventListener('click', () => setTerminalExpanded(true));
+        $('mobile-shell-open')?.addEventListener('click', () => {
+            if (mobileViewport()) setMobileSurface('agents');
+            setTerminalExpanded(true);
+        });
         $('shell-start').addEventListener('click', () => ensureWorkspaceTerminal(false));
         $('shell-new').addEventListener('click', () => ensureWorkspaceTerminal(true));
         $('shell-interrupt').addEventListener('click', interruptWorkspaceShell);
@@ -3073,11 +4136,62 @@ function attachEvents() {
         await refreshAll({refreshOpen:true});
         if (state.selectedProjectId) await loadWorkspaces(state.selectedProjectId);
     });
-    $('refresh-files').addEventListener('click', () => { state.directoryCache.clear(); loadDirectory('', true); });
+    $('refresh-files').addEventListener('click', refreshFiles);
+    $('collapse-file-tree').addEventListener('click', collapseFileTree);
+    $('explorer-workspace-picker').addEventListener('change', event => {
+        if (event.target.value) selectWorkspace(event.target.value);
+    });
+    $('toggle-dotfiles').addEventListener('click', () => {
+        state.showDotfiles = !state.showDotfiles;
+        $('toggle-dotfiles').closest('details')?.removeAttribute('open');
+        try { localStorage.setItem('webconsole.showDotfiles', String(state.showDotfiles)); } catch (_) {}
+        if (state.explorerMode === 'names' && $('file-search').value.trim()) scheduleWorkspaceSearch('names');
+        else if (state.explorerMode === 'content' && $('content-search').value.trim()) scheduleWorkspaceSearch('content');
+        else renderFileTree();
+    });
     $('refresh-git').addEventListener('click', refreshGit);
     $('fetch-branches').addEventListener('click', fetchBranches);
     $('project-search').addEventListener('input', renderTree);
-    $('file-search').addEventListener('input', renderFileTree);
+    $('file-search').addEventListener('input', () => scheduleWorkspaceSearch('names'));
+    $('content-search').addEventListener('input', () => scheduleWorkspaceSearch('content'));
+    for (const button of document.querySelectorAll('[data-explorer-mode]')) {
+        button.addEventListener('click', () => setExplorerMode(button.dataset.explorerMode));
+    }
+    for (const input of ['search-case-sensitive', 'search-whole-word', 'search-regex', 'search-include', 'search-exclude']) {
+        $(input).addEventListener('input', () => {
+            if (state.explorerMode === 'content' && $('content-search').value.trim()) scheduleWorkspaceSearch('content');
+        });
+    }
+    $('history-search').addEventListener('input', renderAgentHistory);
+    document.querySelectorAll('[data-history-scope]').forEach(button => button.addEventListener('click', () => {
+        state.historyScope = button.dataset.historyScope;
+        for (const option of document.querySelectorAll('[data-history-scope]')) {
+            option.setAttribute('aria-pressed', String(option === button));
+        }
+        renderAgentHistory();
+    }));
+    $('refresh-history').addEventListener('click', () => refreshAll({refreshOpen:true}));
+    $('git-search').addEventListener('input', renderGit);
+    $('commit-message').addEventListener('input', () => {
+        const workspaceId = selectedWorkspace()?.id;
+        if (workspaceId) state.gitCommitDrafts.set(workspaceId, $('commit-message').value);
+        renderGit();
+    });
+    $('stage-all').addEventListener('click', () => {
+        const changes = selectedWorkspace()?.git?.changes || [];
+        const paths = changes.filter(change => gitChangeAreas(change).unstaged).map(change => change.path);
+        if (paths.length) performGitAction('stage', paths);
+    });
+    $('commit-changes').addEventListener('click', () => performGitAction('commit'));
+    $('toggle-git-history').addEventListener('click', () => {
+        const list = $('git-history-list');
+        const expanded = list.hidden;
+        list.hidden = !expanded;
+        $('toggle-git-history').setAttribute('aria-expanded', String(expanded));
+        if (expanded) loadGitHistory();
+    });
+    $('create-pr').addEventListener('click', openCreatePrDialog);
+    $('create-pr-form').addEventListener('submit', createPullRequest);
     $('project-form').addEventListener('submit', createProject);
     wirePreferencesEvents();
     $('project-folder-tab').addEventListener('click', () => setProjectSource('folder'));

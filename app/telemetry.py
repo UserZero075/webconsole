@@ -16,7 +16,8 @@ from pathlib import Path
 
 AGENTS = {'codex': 'Codex', 'opencode': 'OpenCode', 'hermes': 'Hermes', 'claude': 'Claude Code', 'aider': 'Aider'}
 SHELLS = {'bash', 'sh', 'zsh', 'fish', 'dash'}
-EVENT_TYPES = {'working', 'idle', 'permission', 'completed', 'message', 'tool', 'error'}
+EVENT_TYPES = {'working', 'idle', 'permission', 'completed', 'interrupted', 'monitoring',
+               'unconfirmed', 'message', 'tool', 'error'}
 CONTROL = re.compile(r'\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b-\x1f\x7f]')
 PERMISSION = re.compile(r'would you like to (?:run|allow|proceed)|do you (?:want to (?:run|allow|proceed|execute)|approve)|allow (?:once|always|execution)|permission required|requires? (?:your )?approval|approve this|¿(?:permites|autorizas)|necesita(?: tu)? permiso', re.I)
 
@@ -83,7 +84,9 @@ class Telemetry:
             self.cache[sid] = dict(activity=[], previous_lines=None, last_output=None,
                 ticks={}, process_key=None, notification=info.get('notification'),
                 dismissed=info.get('dismissed_notification'), agent=None,
-                event_state=(info.get('notification') or {}).get('kind') if (info.get('notification') or {}).get('source') == 'event' else None, event_at=0, sequence=0)
+                event_state=(info.get('notification') or {}).get('kind') if (info.get('notification') or {}).get('source') == 'event' else None,
+                event_source='event' if (info.get('notification') or {}).get('source') == 'event' else None,
+                event_at=0, sequence=0)
         return self.cache[sid]
 
     def append(self, item, kind, text, now, source='screen', key=None):
@@ -130,13 +133,15 @@ class Telemetry:
                     item['structured_activity'] = True
                     item['last_output'] = max(item.get('last_output') or 0, event_time)
                 text = event.get('message') or {'working': 'El agente empezó a trabajar', 'idle': 'El agente está en espera',
-                    'completed': 'El agente terminó su turno', 'permission': 'El agente necesita tu permiso', 'error': 'El agente notificó un error'}.get(kind, '')
+                    'completed': 'El agente terminó su turno', 'permission': 'El agente necesita tu permiso',
+                    'interrupted': 'El turno del agente fue interrumpido', 'monitoring': 'El agente está supervisando una tarea',
+                    'unconfirmed': 'No se pudo confirmar el estado del turno', 'error': 'El agente notificó un error'}.get(kind, '')
                 source_agent = event.get('agent')
                 if isinstance(source_agent, str) and source_agent in AGENTS:
                     item['agent'] = dict(key=source_agent, name=AGENTS[source_agent], kind='agent')
                 if kind not in {'message', 'tool'}:
-                    item.update(event_state=kind, event_at=now)
-                if kind in {'working', 'idle'} and (item.get('notification') or {}).get('kind') == 'permission':
+                    item.update(event_state=kind, event_source='event', event_at=now)
+                if kind in {'working', 'idle', 'interrupted'} and (item.get('notification') or {}).get('kind') == 'permission':
                     item['notification'] = None
                     info['notification'] = None
                     self.persist(sid, info)
@@ -192,13 +197,16 @@ class Telemetry:
                     if previous_key and not process_key:
                         previous_agent = item.get('agent') or identity
                         # Ignore transient shell helpers such as prompt/status commands.
-                        if previous_agent['kind'] == 'agent' or now - item.get('process_started', now) >= 2:
+                        has_terminal_turn_event = item.get('event_state') in {'completed', 'error', 'interrupted'}
+                        if (not has_terminal_turn_event
+                                and (previous_agent['kind'] == 'agent' or now - item.get('process_started', now) >= 2)):
                             self.notify(sid, info, item, 'completed', previous_agent['name'] + ': el proceso finalizó', 'process', str(previous_key) + ':exit')
                             self.append(item, 'status', previous_agent['name'] + ': el proceso finalizó', now, 'process')
-                        item['event_state'] = None
+                        if item.get('event_state') in {'working', 'permission'}:
+                            item.update(event_state=None, event_source=None)
                     if process_key != previous_key:
-                        if item['previous_lines'] is not None:
-                            item['event_state'] = None
+                        if previous_key and process_key and identity['kind'] == 'agent':
+                            item.update(event_state=None, event_source=None)
                         item.update(process_key=process_key, previous_lines=None, last_output=None, structured_activity=False, process_started=now)
                     item['agent'] = identity
                     self.ingest(sid, info, item, now)
@@ -244,13 +252,19 @@ class Telemetry:
                         item['dismissed'] = None
                         info['dismissed_notification'] = None
                         self.persist(sid, info)
-                    if not alive:
+                    event_status = {
+                        'working':'working', 'idle':'idle', 'permission':'permission',
+                        'completed':'done', 'error':'failed', 'interrupted':'interrupted',
+                        'monitoring':'monitoring', 'unconfirmed':'unconfirmed',
+                    }
+                    if item['event_state'] in event_status:
+                        state = event_status[item['event_state']]
+                        source = item.get('event_source') or 'event'
+                        detail = 'Estado de turno comunicado por el agente'
+                    elif not alive:
                         state, source, detail = 'ended', 'process', 'La consola terminó'
                     elif prompt:
                         state, source, detail = 'permission', 'estimated', 'Posible solicitud de permiso en pantalla'
-                    elif item['event_state']:
-                        state = {'completed': 'idle', 'error': 'idle'}.get(item['event_state'], item['event_state'])
-                        source, detail = 'event', 'Estado comunicado por el agente'
                     elif not tool:
                         state, source, detail = 'idle', 'process', 'Consola lista; no hay un agente ejecutándose'
                     elif cpu_active or changed or (item['last_output'] and now - item['last_output'] < 10):

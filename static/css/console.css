@@ -3,7 +3,7 @@
 :root {
     --bg-primary: #0d1117;
     --bg-secondary: #161b22;
-    --bg-terminal: #1a1a2e;
+    --bg-terminal: #0b0b0d;
     --text-primary: #e6edf3;
     --text-secondary: #8b949e;
     --accent-blue: #58a6ff;
@@ -364,10 +364,11 @@ html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .
     font-size: 11px;
 }
 
-/* Local input composer: DOM-only line buffer. It intentionally lives outside
+/* Local input composer: DOM-only multiline buffer. It intentionally lives outside
    xterm so Backspace/Delete never sends destructive CSI edits into TUI screens. */
 .local-input-composer {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
     min-height: 36px;
@@ -408,27 +409,30 @@ html.embedded-terminal-document .terminal-app, html.embedded-terminal-document .
 }
 
 .local-input-text {
-    white-space: pre;
-    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
-#local-input-before {
-    overflow: hidden;
-    text-overflow: clip;
+.local-input-content {
+    min-width: 0;
+    max-height: min(35vh, 220px);
+    overflow-y: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
 }
 
 #local-input-after {
     color: var(--text-secondary);
-    overflow: hidden;
-    text-overflow: clip;
 }
 
 .local-input-cursor {
-    flex: 0 0 auto;
+    display: inline-block;
     width: 8px;
     height: 1.2em;
     background: var(--text-primary);
     opacity: 0.9;
+    vertical-align: text-bottom;
     animation: localCursorBlink 1s steps(1) infinite;
 }
 

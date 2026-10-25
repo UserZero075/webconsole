@@ -200,3 +200,40 @@ def repository_permission(full_name):
     except ValueError as error:
         raise GitHubError('No se pudieron verificar los permisos del repositorio.') from error
     return {'owned': str(result[0]).casefold() == current['login'].casefold(), 'push': bool(result[1])}
+
+
+def validate_pull_request_request(directory, branch, base, title, body=''):
+    """Validate a PR request before the caller performs the visible branch push."""
+    if not isinstance(branch, str) or len(branch) > 200 or any(char in branch for char in '\x00\n\r'):
+        raise GitHubError('La rama actual no es válida para crear un Pull Request.')
+    if not isinstance(base, str) or len(base) > 200 or any(char in base for char in '\x00\n\r'):
+        raise GitHubError('Selecciona una rama base válida.')
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
+        raise GitHubError('El título del Pull Request debe tener entre 1 y 200 caracteres.')
+    if not isinstance(body, str) or len(body) > 10000:
+        raise GitHubError('La descripción del Pull Request supera el límite de 10000 caracteres.')
+    # Ask Git to validate the ref syntax without ever interpolating it into a shell command.
+    git = shutil.which('git')
+    if not git:
+        raise GitHubError('Git no está instalado en el servidor.')
+    try:
+        for ref in (branch, base):
+            checked = subprocess.run([git, '-C', str(directory), 'check-ref-format', '--branch', ref],
+                                     capture_output=True, text=True, timeout=5, check=False, env=_env())
+            if checked.returncode:
+                raise GitHubError('La rama actual o la rama base no es válida.')
+    except subprocess.TimeoutExpired as error:
+        raise GitHubError('Git tardó demasiado en validar la rama.') from error
+
+
+def create_pull_request(directory, branch, base, title, body=''):
+    """Create a PR for an explicitly selected, already-pushed local branch."""
+    _account()
+    validate_pull_request_request(directory, branch, base, title, body)
+    gh = resolve_gh()
+    raw = _run([gh, 'pr', 'create', f'--head={branch}', f'--base={base}',
+                f'--title={title.strip()}', f'--body={body}'], timeout=60).strip()
+    match = re.search(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+', raw)
+    if not match:
+        raise GitHubError('GitHub no devolvió un enlace verificable para el Pull Request.')
+    return {'url': match.group(0)}

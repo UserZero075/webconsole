@@ -47,7 +47,8 @@ def main():
             pass
         return
     parser = argparse.ArgumentParser()
-    parser.add_argument('--type', choices=['working', 'idle', 'permission', 'completed', 'message', 'tool', 'error'], required=True)
+    parser.add_argument('--type', choices=['working', 'idle', 'permission', 'completed', 'interrupted',
+        'monitoring', 'unconfirmed', 'message', 'tool', 'error'], required=True)
     parser.add_argument('--agent', default='hermes')
     parser.add_argument('--message', default='')
     args = parser.parse_args()

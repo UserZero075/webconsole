@@ -13,6 +13,7 @@ from preferences import PreferencesError, PreferencesStore, normalize, DEFAULTS
 
 def test_normalize_defaults_and_partial_updates():
     assert normalize({}) == DEFAULTS
+    assert DEFAULTS['terminal_background'] == '#0b0b0d'
     assert normalize({'brand_name': '  Mi Consola  '})['brand_name'] == 'Mi Consola'
     assert normalize({'accent_color': '#AABBCC'})['accent_color'] == '#aabbcc'
     assert normalize({'terminal_background': '#0d1117'})['terminal_background'] == '#0d1117'

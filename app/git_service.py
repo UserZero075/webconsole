@@ -7,7 +7,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from filesystem import MAX_FILE_BYTES
+from filesystem import MAX_FILE_BYTES, FileAccessError
 from github_service import resolve_gh
 
 
@@ -140,6 +140,22 @@ def repository_root(directory):
     return os.path.realpath(result.stdout.strip())
 
 
+def _filter_config_overrides(directory):
+    """Return per-invocation overrides that keep `git status` from running filters."""
+    configured = run_git(directory, 'config', '--name-only', '--get-regexp',
+                         r'^filter\..*\.(clean|smudge|process)$', check=False)
+    drivers = set()
+    for key in configured.stdout.splitlines():
+        match = re.fullmatch(r'filter\.(.*)\.(?:clean|smudge|process)', key, re.IGNORECASE)
+        if match and match.group(1):
+            drivers.add(match.group(1))
+    overrides = []
+    for driver in sorted(drivers):
+        for command in ('clean', 'smudge', 'process'):
+            overrides.extend(['-c', f'filter.{driver}.{command}='])
+    return overrides
+
+
 def parse_worktrees(output):
     records, current = [], {}
     for line in output.splitlines():
@@ -199,9 +215,11 @@ def inspect(directory):
         url = run_git(directory, 'remote', 'get-url', name, check=False).stdout.strip()
         provider = 'github' if re.search(r'(^|[/:])github\.com[:/]', url, re.I) else 'other'
         remotes.append({'name': name, 'provider': provider})
-    status = run_git(directory, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.')
+    status = run_git(directory, *_filter_config_overrides(directory), 'status',
+                      '--porcelain=v1', '-z', '--untracked-files=all', '--', '.')
     scope = os.path.relpath(os.path.realpath(directory), root)
     entries = []
+    changes_truncated = False
     status_items = status.stdout.split('\0')
     index = 0
     while index < len(status_items):
@@ -236,6 +254,7 @@ def inspect(directory):
                     item['source_outside_workspace'] = True
         entries.append(item)
         if len(entries) >= 500:
+            changes_truncated = any(candidate for candidate in status_items[index:])
             break
     worktrees = parse_worktrees(run_git(directory, 'worktree', 'list', '--porcelain').stdout)
     return {
@@ -244,7 +263,7 @@ def inspect(directory):
         'upstream': upstream.stdout.strip() if upstream.returncode == 0 else '',
         'default_branch': default.stdout.strip().removeprefix('origin/') if default.returncode == 0 else '',
         'branches': branches, 'remotes': remotes, 'github_available': any(remote['provider'] == 'github' for remote in remotes),
-        'changes': entries, 'worktrees': worktrees,
+        'changes': entries, 'changes_truncated': changes_truncated, 'worktrees': worktrees,
     }
 
 
@@ -424,6 +443,172 @@ def read_diff(directory, workspace, files, relative, kind):
         'base': base_text, 'changed': changed_text,
         'working_file_exists': files.exists_regular(relative),
     }
+
+
+def _mutation_paths(directory, files, paths, *, area):
+    if not isinstance(paths, list) or not paths or len(paths) > 500:
+        raise GitError('Selecciona entre 1 y 500 archivos.')
+    current = {change['path']: change for change in inspect(directory).get('changes', [])}
+    result = []
+    seen = set()
+    for path in paths:
+        parts = files.validate_path(path)
+        if not parts:
+            raise GitError('Selecciona un archivo válido.')
+        normalized = '/'.join(parts)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        change = current.get(normalized)
+        if not change:
+            raise GitError('El estado Git cambió. Actualiza la lista e inténtalo de nuevo.')
+        staged = change.get('index') not in {None, '', ' ', '?'}
+        unstaged = change.get('status') == 'untracked' or change.get('worktree') not in {None, '', ' ', '?'}
+        if (area == 'staged' and not staged) or (area == 'worktree' and not unstaged):
+            raise GitError('El cambio ya no está disponible en esa sección.')
+        result.append((normalized, change))
+    return result
+
+
+def _refuse_external_filters(directory, paths, operation):
+    """Avoid running repository-configured clean/smudge commands from the inspector."""
+    if not paths:
+        return
+    args = ['check-attr', '-z', 'filter', '--', *(f':(literal){path}' for path in paths)]
+    raw = run_git_bytes(directory, *args, timeout=10).stdout
+    fields = raw.split(b'\0')
+    for index in range(0, len(fields) - 2, 3):
+        attribute, value = fields[index + 1], fields[index + 2]
+        if attribute == b'filter' and value not in {b'', b'unspecified', b'unset'}:
+            raise GitError(f'No se puede {operation} desde el inspector: Git usa el filtro "{value.decode("utf-8", "replace")[:80]}". Usa Git desde la terminal.')
+
+
+def stage_paths(directory, files, paths):
+    selected = _mutation_paths(directory, files, paths, area='worktree')
+    _refuse_external_filters(directory, [path for path, _ in selected], 'preparar')
+    pathspecs = [f':(literal){path}' for path, _ in selected]
+    run_git(directory, '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null',
+            'add', '-A', '--', *pathspecs, timeout=30)
+    return inspect(directory)
+
+
+def unstage_paths(directory, files, paths):
+    selected = _mutation_paths(directory, files, paths, area='staged')
+    pathspecs = [f':(literal){path}' for path, _ in selected]
+    if _head_identity(directory):
+        run_git(directory, 'restore', '--staged', '--', *pathspecs, timeout=20)
+    else:
+        run_git(directory, 'rm', '--cached', '--ignore-unmatch', '-q', '--', *pathspecs, timeout=20)
+    return inspect(directory)
+
+
+def discard_paths(directory, files, paths):
+    selected = _mutation_paths(directory, files, paths, area='worktree')
+    tracked = [path for path, change in selected if change.get('status') != 'untracked']
+    untracked = [path for path, change in selected if change.get('status') == 'untracked']
+    if tracked:
+        _refuse_external_filters(directory, tracked, 'descartar')
+        run_git(directory, 'restore', '--worktree', '--', *(f':(literal){path}' for path in tracked), timeout=30)
+    for path in untracked:
+        files.unlink_file(path)
+    return inspect(directory)
+
+
+def commit_staged(directory, message):
+    if not isinstance(message, str) or not message.strip() or len(message) > 2000 or '\x00' in message:
+        raise GitError('Escribe un mensaje de commit de hasta 2000 caracteres.')
+    root = repository_root(directory)
+    if not root:
+        raise GitError('Este workspace no tiene un repositorio Git disponible.')
+    staged_raw = run_git_bytes(directory, 'diff', '--cached', '--name-only', '-z', timeout=10).stdout
+    staged_paths = [item for item in staged_raw.split(b'\0') if item]
+    if not staged_paths:
+        raise GitError('No hay cambios preparados para confirmar.')
+    if len(staged_paths) > 1000:
+        raise GitError('Hay demasiados archivos preparados para confirmar desde el inspector.')
+    scope = os.path.relpath(os.path.realpath(directory), root)
+    if scope != '.':
+        prefix = os.fsencode(scope.replace(os.sep, '/') + '/')
+        if any(not path.startswith(prefix) for path in staged_paths):
+            raise GitError('Hay cambios preparados fuera de este workspace. Confírmalos desde la raíz del repositorio.')
+    run_git(directory, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+            'commit', '-m', message.strip(), timeout=45)
+    return inspect(directory)
+
+
+def diff_stats(directory, files=None):
+    """Return bounded, external-driver-free line counts for staged and working-tree diffs."""
+    result = {}
+    changes = inspect(directory).get('changes', [])
+    pathspecs = [f":(literal){change['path']}" for change in changes if change.get('path')]
+    if not pathspecs:
+        return result
+    filter_overrides = _filter_config_overrides(directory)
+    for key, args in (
+        ('worktree', ('diff', '--numstat', '-z', '--no-ext-diff', '--no-textconv', '--no-renames')),
+        ('staged', ('diff', '--cached', '--numstat', '-z', '--no-ext-diff', '--no-textconv', '--no-renames')),
+    ):
+        raw = run_git_bytes(directory, *filter_overrides, *args, '--', *pathspecs, timeout=10).stdout
+        records = raw.split(b'\0')
+        for record in records:
+            if not record:
+                continue
+            additions, separator, rest = record.partition(b'\t')
+            deletions, separator2, path = rest.partition(b'\t')
+            if not separator or not separator2 or not path:
+                continue
+            try:
+                added = int(additions)
+                removed = int(deletions)
+            except ValueError:
+                added = removed = None
+            name = path.decode('utf-8', 'replace')
+            item = result.setdefault(name, {})
+            item[key] = {'additions': added, 'deletions': removed}
+            if len(result) >= 1000:
+                break
+    if files:
+        untracked_count = 0
+        untracked_bytes = 0
+        for change in changes:
+            if change.get('status') != 'untracked' or change['path'] in result:
+                continue
+            if untracked_count >= 100:
+                break
+            try:
+                item = files.read(change['path'])
+            except FileAccessError:
+                continue
+            if untracked_bytes + item['size'] > 8 * 1024 * 1024:
+                continue
+            untracked_count += 1
+            untracked_bytes += item['size']
+            result[change['path']] = {'worktree': {'additions': len(item['content'].splitlines()), 'deletions': 0}}
+    return result
+
+
+def commit_history(directory, limit=40):
+    try:
+        limit = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit = 40
+    result = run_git(directory, 'log', f'-{limit}', '--format=%H%x00%h%x00%an%x00%at%x00%s%x1e', check=False)
+    if result.returncode:
+        if _head_identity(directory):
+            raise GitError('No se pudo leer el historial de commits.')
+        return []
+    commits = []
+    for record in result.stdout.split('\x1e'):
+        fields = record.strip('\n').split('\x00', 4)
+        if len(fields) != 5 or not fields[0]:
+            continue
+        try:
+            timestamp = int(fields[3])
+        except ValueError:
+            timestamp = 0
+        commits.append({'hash': fields[0], 'short_hash': fields[1], 'author': fields[2][:100],
+                        'timestamp': timestamp, 'subject': fields[4][:500]})
+    return commits
 
 
 def fetch(directory, remote):

@@ -14,7 +14,7 @@ app.jinja_env.globals["asset_version"] = lambda _path: "mobile-fixture"
 app.jinja_env.globals["preferences"] = {
     "brand_name": "WebConsole fixture",
     "accent_color": "#8acfb3",
-    "terminal_background": "#1a1a2e",
+    "terminal_background": "#0b0b0d",
 }
 
 PROJECT = {"id": "p1", "name": "Mobile fixture", "path": "/fixture", "session_count": 0, "workspace_count": 1}
@@ -46,7 +46,7 @@ def embedded_console_fixture():
         "console.html", preferences={
         "brand_name": "WebConsole fixture",
         "accent_color": "#8acfb3",
-        "terminal_background": "#1a1a2e",
+        "terminal_background": "#0b0b0d",
         }, session_id="fixture-session", token="fixture-token",
         session_role="agent", embedded=True,
     )
@@ -67,7 +67,7 @@ def preferences():
     return jsonify({
         "brand_name": "WebConsole fixture",
         "accent_color": "#8acfb3",
-        "terminal_background": "#1a1a2e",
+        "terminal_background": "#0b0b0d",
     })
 
 

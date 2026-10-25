@@ -119,8 +119,8 @@
         <div class="local-input-composer" id="local-input-composer">
             <span class="local-input-label">LOCAL</span>
             <span class="local-input-prompt">›</span>
-            <span class="local-input-text" id="local-input-before"></span><span class="local-input-cursor" aria-hidden="true"></span><span class="local-input-text" id="local-input-after"></span>
-            <span class="local-input-hint">Enter envía · Ctrl+B Live</span>
+            <span class="local-input-content" id="local-input-content"><span class="local-input-text" id="local-input-before"></span><span class="local-input-cursor" id="local-input-cursor" aria-hidden="true"></span><span class="local-input-text" id="local-input-after"></span></span>
+            <span class="local-input-hint">Enter envía · Shift+Enter nueva línea · Ctrl+B Live</span>
         </div>
 
         <!-- Status Bar -->
@@ -156,6 +156,7 @@
     <div class="toast-container" id="toast-container"></div>
 
     <script src="/static/js/lib/xterm-531.js?v={{ asset_version('js/lib/xterm-531.js') }}"></script>
+    <script src="/static/js/lib/xterm-addon-webgl-016.js?v={{ asset_version('js/lib/xterm-addon-webgl-016.js') }}"></script>
     <script src="/static/js/lib/xterm-addon-fit-081.js?v={{ asset_version('js/lib/xterm-addon-fit-081.js') }}"></script>
     <script src="/static/js/lib/xterm-addon-web-links-090.js?v={{ asset_version('js/lib/xterm-addon-web-links-090.js') }}"></script>
     <script src="/static/js/lib/pako-210.min.js?v={{ asset_version('js/lib/pako-210.min.js') }}"></script>
@@ -205,6 +206,7 @@
         const TERMINAL_STALE_AFTER_MS = 75000;
         const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
         const MAX_VISIBLE_ATTACHMENT_TRANSFERS = 10;
+        const ATTACHMENT_TRANSFER_AUTO_DISMISS_MS = 2500;
         let lastResyncAt = 0;
         const terminalDiagnosticsEnabled = new URLSearchParams(window.location.search || '').get('diag') === '1'
             || localStorage.getItem('webconsole.terminal.debug') === '1';
@@ -218,39 +220,42 @@
         let nextAttachmentTransferId = 1;
         let attachmentUploadActive = false;
         let attachmentTransferDismissed = false;
+        let attachmentTransferDismissTimer = null;
 
         // Initialize xterm
         const terminal = new Terminal({
             cursorBlink: true,
             cursorStyle: 'block',
-            fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace',
+            fontFamily: '"JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Monaco, "Cascadia Mono", Consolas, "Liberation Mono", monospace',
+            fontWeight: 400,
+            fontWeightBold: 600,
             fontSize: 14,
-            lineHeight: 1.2,
+            lineHeight: 1.0,
             letterSpacing: 0,
             scrollback: 3000,
             smoothScrollDuration: 0,
             fastScrollModifier: 'alt',
             theme: {
                 background: '{{ preferences.terminal_background }}',
-                foreground: '#eee',
-                cursor: '#fff',
+                foreground: '#e7e7e9',
+                cursor: '#f5f5f5',
                 cursorAccent: '{{ preferences.terminal_background }}',
-                selection: 'rgba(255, 255, 255, 0.3)',
+                selection: 'rgba(255, 255, 255, 0.24)',
                 black: '{{ preferences.terminal_background }}',
-                red: '#ff5370',
-                green: '#c3e88d',
-                yellow: '#ffcb6b',
-                blue: '#82aaff',
-                magenta: '#c792ea',
-                cyan: '#89ddff',
-                white: '#eeffff',
-                brightBlack: '#545580',
-                brightRed: '#ff5370',
-                brightGreen: '#c3e88d',
-                brightYellow: '#ffcb6b',
-                brightBlue: '#82aaff',
-                brightMagenta: '#c792ea',
-                brightCyan: '#89ddff',
+                red: '#f07178',
+                green: '#9ccc9c',
+                yellow: '#e7c47a',
+                blue: '#79a9ff',
+                magenta: '#c7a0e8',
+                cyan: '#83c9d8',
+                white: '#dedee0',
+                brightBlack: '#77777d',
+                brightRed: '#ff858b',
+                brightGreen: '#b5dfa8',
+                brightYellow: '#f2d38d',
+                brightBlue: '#91baff',
+                brightMagenta: '#d6b4f0',
+                brightCyan: '#a0deea',
                 brightWhite: '#ffffff'
             },
             allowProposedApi: true
@@ -298,6 +303,24 @@
 
         // Open terminal
         terminal.open(document.getElementById('terminal'));
+
+        // Prefer the GPU renderer for sharper text; xterm's default renderer
+        // remains active when WebGL2 is unavailable or its context is lost.
+        function enableWebglRenderer() {
+            const WebglAddonClass = window.WebglAddon?.WebglAddon;
+            if (typeof WebglAddonClass !== 'function') return;
+            try {
+                const addon = new WebglAddonClass();
+                addon.onContextLoss(() => {
+                    addon.dispose();
+                    terminalDiagnostic('webgl-context-lost');
+                });
+                terminal.loadAddon(addon);
+            } catch (_) {
+                terminalDiagnostic('webgl-renderer-unavailable');
+            }
+        }
+        enableWebglRenderer();
 
         const scrollControls = document.getElementById('terminal-scroll-controls');
         function bindTouchScroll() {
@@ -357,7 +380,7 @@
 
         // Send user keystrokes as compact binary frames where possible.
         // Local input mode keeps normal text editing 100% local and only sends
-        // the completed line on Enter. This removes keystroke-by-keystroke lag
+        // the completed input on Enter. This removes keystroke-by-keystroke lag
         // on bad links while still allowing raw control keys to pass through.
         const encoder = new TextEncoder();
         let localInputMode = !embedded && localStorage.getItem('webconsole.localInputMode') === 'on';
@@ -378,8 +401,10 @@
         localStorage.removeItem('webconsole.commandHistory');
 
         const localComposer = document.getElementById('local-input-composer');
+        const localInputContent = document.getElementById('local-input-content');
         const localInputBefore = document.getElementById('local-input-before');
         const localInputAfter = document.getElementById('local-input-after');
+        const localInputCursor = document.getElementById('local-input-cursor');
         const suggestionPanel = document.getElementById('suggestion-panel');
         const pathCommands = new Set(['cd', 'ls', 'cat', 'less', 'tail', 'head', 'vim', 'nano', 'code', 'open']);
 
@@ -460,6 +485,11 @@
             sendParentMessage({type:'webconsole:terminal-status', session_id:sessionId, state});
         }
 
+        function isBrowserPasteShortcut(event) {
+            return event.type === 'keydown' && event.key?.toLowerCase() === 'v'
+                && (event.ctrlKey || event.metaKey) && !event.altKey;
+        }
+
         function mediaFilesFromClipboard(event) {
             const files = [...(event.clipboardData?.files || [])];
             if (files.length) return files;
@@ -537,6 +567,23 @@
             return item.error || 'No se pudo subir';
         }
 
+        function canAutoDismissAttachmentTransfers(transfers) {
+            return transfers.length > 0
+                && transfers.every(item => item.state === 'uploaded' || item.state === 'inserted');
+        }
+
+        function scheduleAttachmentTransferDismissal() {
+            clearTimeout(attachmentTransferDismissTimer);
+            attachmentTransferDismissTimer = null;
+            if (!canAutoDismissAttachmentTransfers(attachmentTransfers)) return;
+            attachmentTransferDismissTimer = setTimeout(() => {
+                attachmentTransferDismissTimer = null;
+                if (!canAutoDismissAttachmentTransfers(attachmentTransfers)) return;
+                attachmentTransferDismissed = true;
+                document.getElementById('attachment-transfer-panel').hidden = true;
+            }, ATTACHMENT_TRANSFER_AUTO_DISMISS_MS);
+        }
+
         function updateAttachmentTransferSummary() {
             const active = attachmentTransfers.filter(item => item.state === 'uploading' || item.state === 'processing').length;
             const queued = attachmentTransfers.filter(item => item.state === 'queued').length;
@@ -592,6 +639,8 @@
             retry.type = 'button'; retry.textContent = 'Reintentar'; retry.hidden = true;
             retry.addEventListener('click', () => {
                 if (!item.file || item.state !== 'failed' || !item.retryable) return;
+                clearTimeout(attachmentTransferDismissTimer);
+                attachmentTransferDismissTimer = null;
                 attachmentTransferDismissed = false;
                 document.getElementById('attachment-transfer-panel').hidden = false;
                 item.state = 'queued'; item.progress = 0; item.loaded = 0; item.error = ''; item.notice = '';
@@ -737,6 +786,7 @@
             } finally {
                 attachmentUploadActive = false;
                 updateAttachmentTransferSummary();
+                scheduleAttachmentTransferDismissal();
             }
         }
 
@@ -748,6 +798,8 @@
                 showToast('No se pudo leer ningún archivo del portapapeles.');
                 return;
             }
+            clearTimeout(attachmentTransferDismissTimer);
+            attachmentTransferDismissTimer = null;
             attachmentTransferDismissed = false;
             const panel = document.getElementById('attachment-transfer-panel');
             panel.hidden = false;
@@ -756,28 +808,40 @@
         }
 
         document.getElementById('attachment-transfer-close')?.addEventListener('click', () => {
+            clearTimeout(attachmentTransferDismissTimer);
+            attachmentTransferDismissTimer = null;
             attachmentTransferDismissed = true;
             document.getElementById('attachment-transfer-panel').hidden = true;
         });
 
+        function fallbackClipboardCopy(text) {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed'; textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.focus(); textarea.select();
+            let copied = false;
+            try { copied = document.execCommand('copy'); } catch (_) {}
+            textarea.remove();
+            return copied;
+        }
+
+        function copyTextToClipboard(text) {
+            if (navigator.clipboard?.writeText) {
+                return navigator.clipboard.writeText(text).then(() => true, () => fallbackClipboardCopy(text));
+            }
+            return Promise.resolve(fallbackClipboardCopy(text));
+        }
+
         function copyTerminalSelection() {
             const selected = terminal.getSelection();
             if (!selected) return;
-            const fallback = () => {
-                const textarea = document.createElement('textarea');
-                textarea.value = selected;
-                textarea.setAttribute('readonly', '');
-                textarea.style.position = 'fixed'; textarea.style.opacity = '0';
-                document.body.appendChild(textarea);
-                textarea.select();
-                let copied = false;
-                try { copied = document.execCommand('copy'); } catch (_) {}
-                textarea.remove();
-                if (!copied) showToast('No se pudo acceder al portapapeles. Selecciona el texto y usa la acción Copiar del navegador.');
-            };
-            if (navigator.clipboard?.writeText) {
-                navigator.clipboard.writeText(selected).catch(fallback);
-            } else fallback();
+            copyTextToClipboard(selected).then(copied => {
+                showToast(copied
+                    ? 'Texto copiado al portapapeles de este navegador.'
+                    : 'El navegador no permitió copiar el texto al portapapeles.');
+            }, () => showToast('El navegador no permitió copiar el texto al portapapeles.'));
         }
 
         function interruptTerminal() {
@@ -903,11 +967,16 @@
 
         function saveCommandHistory(line) {
             const command = (line || '').trim();
-            if (!command) return;
+            if (!command || command.includes('\n')) return;
             commandHistory = commandHistory.filter(item => item !== command);
             commandHistory.unshift(command);
             commandHistory = commandHistory.slice(0, 120);
             sessionStorage.setItem('webconsole.commandHistory', JSON.stringify(commandHistory));
+        }
+
+        function completedLocalInputPayload(line) {
+            // Preserve embedded newlines as Shift+Enter key events for agent TUIs.
+            return line.replace(/\n/g, '\x1b[13;2u') + '\r';
         }
 
         function getLineContext(line = getActiveLine(), cursor = getActiveCursor()) {
@@ -1000,7 +1069,7 @@
             clearTimeout(suggestionTimer);
             const line = getActiveLine();
             const cursor = getActiveCursor();
-            if (!line.trim()) {
+            if (!line.trim() || line.includes('\n')) {
                 hideSuggestions();
                 return;
             }
@@ -1070,6 +1139,12 @@
             // Local input is DOM-only. xterm receives no local edits until Enter.
             localInputBefore.textContent = localBuffer.slice(0, localCursor);
             localInputAfter.textContent = localBuffer.slice(localCursor);
+            if (localInputMode && localInputContent.clientHeight) {
+                const contentRect = localInputContent.getBoundingClientRect();
+                const cursorRect = localInputCursor.getBoundingClientRect();
+                if (cursorRect.bottom > contentRect.bottom) localInputContent.scrollTop += cursorRect.bottom - contentRect.bottom;
+                else if (cursorRect.top < contentRect.top) localInputContent.scrollTop -= contentRect.top - cursorRect.top;
+            }
         }
 
         function insertLocalVisual(text) {
@@ -1119,7 +1194,7 @@
                 const line = localBuffer;
                 saveCommandHistory(line);
                 clearLocalBufferVisual();
-                sendInput(line + '\r');
+                sendInput(completedLocalInputPayload(line));
                 return true;
             }
 
@@ -1182,6 +1257,15 @@
 
             // Other controls (Ctrl+C, Ctrl+D, ESC) pass through.
             hideSuggestions();
+            return false;
+        }
+
+        function handleLocalInputKeydown(event) {
+            if (event.type !== 'keydown' || event.key !== 'Enter'
+                || !event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return true;
+            event.preventDefault();
+            if (localInputMode) insertLocalVisual('\n');
+            else sendInput('\x1b[13;2u');
             return false;
         }
 
@@ -1665,8 +1749,10 @@
 
         // Utility functions
         function copyLink() {
-            navigator.clipboard.writeText(window.location.href);
-            showToast('Link copied to clipboard');
+            copyTextToClipboard(window.location.href).then(copied => {
+                showToast(copied ? 'Enlace copiado al portapapeles de este navegador.'
+                    : 'El navegador no permitió copiar el enlace al portapapeles.');
+            }, () => showToast('El navegador no permitió copiar el enlace al portapapeles.'));
         }
 
         function toggleFullscreen() {
@@ -1707,6 +1793,12 @@
 
         // Keyboard shortcuts
         terminal.attachCustomKeyEventHandler((e) => {
+            // xterm may report Shift+Enter as a plain carriage return. Buffer it
+            // locally, or send the modified-Enter sequence to a live TUI.
+            if (!handleLocalInputKeydown(e)) return false;
+            // Let the browser dispatch `paste`; xterm otherwise consumes Ctrl+V
+            // as terminal input before image attachments can inspect the clipboard.
+            if (isBrowserPasteShortcut(e)) return false;
             // Ctrl+B toggles local/live input mode.
             if (!embedded && e.ctrlKey && e.key.toLowerCase() === 'b') {
                 e.preventDefault();
@@ -1734,7 +1826,9 @@
             event.stopPropagation();
             const alsoHasText = Boolean(event.clipboardData?.getData('text/plain'));
             if (sessionRole === 'workspace_shell') {
-                showToast('Los adjuntos se insertan desde una sesión de agente, no en la shell del workspace.');
+                const message = 'Los adjuntos se insertan desde una sesión de agente, no en la shell del workspace.';
+                showToast(message);
+                sendParentMessage({type:'webconsole:attachment-error', session_id:sessionId, error:message});
                 return;
             }
             if (alsoHasText) showToast('Se adjuntarán los archivos; pega el texto del portapapeles por separado.');
